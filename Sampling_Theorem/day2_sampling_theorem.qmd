@@ -1,0 +1,299 @@
+---
+title: GBSV MC1 – Sampling Theorem
+author: Luca Manna
+date: '2026-03-09'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Sampling Theorem
+
+**Name:** Luca Manna  
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 1 – Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+Im Bereich der NFL-Leistungsanalyse werden Bewegungssignale von Spielern mithilfe von RFID-Tracking-Chips (Zebra Technologies) in den Schulterpolstern mit 10 Hz abgetastet. Beim Sprinten erzeugt jeder Schritt eines Spielers eine periodische Geschwindigkeitsoszillation (Stride Dynamics). Diese Schrittmuster enthalten Informationen über Lauftechnik, Ermüdung und Verletzungsrisiko und sind besonders relevant für Running Backs, die pro Spiel zahlreiche Sprints ausführen. Dieser Anwendungsfall ist relevant für die USA, da die NFL das grösste Tracking-Datenprogramm im Profisport betreibt (Next Gen Stats) und alle 32 Teams diese Daten zur Leistungsoptimierung nutzen.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der Bestimmung einer geeigneten Sampling Rate für die Erfassung von Schrittdynamiken (Stride Dynamics) eines NFL Running Backs während Sprints. Wird die Sampling Rate zu niedrig gewählt, können die periodischen Geschwindigkeitsoszillationen durch Aliasing verfälscht werden. Höhere harmonische Anteile der Schrittbewegung werden dann als niederfrequente Artefakte fehlinterpretiert. Wird sie zu hoch gewählt, entsteht unnötiges Datenvolumen ohne zusätzlichen Informationsgewinn. Die korrekte Erfassung der Schrittfrequenz und ihrer Harmonischen ist entscheidend für eine zuverlässige biomechanische Analyse.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Ziel ist es zu untersuchen, wie die Wahl der Sampling Rate die Genauigkeit beeinflusst, mit der periodische Schrittdynamiken eines sprintenden NFL Running Backs erfasst werden. Es soll bestimmt werden, ab welcher Sampling Rate Aliasing-Artefakte auftreten und die Schrittfrequenz nicht mehr korrekt rekonstruiert werden kann.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Das Signal modelliert die momentane Geschwindigkeit eines sprintenden NFL Running Backs mit überlagerten Schrittoszillationen. Die Modellparameter basieren auf realen Tracking-Daten von Kyren Williams (LA Rams, Saison 2023, 206 Spielzüge, Sprint-Geschwindigkeit P90 = 5.93 yd/s) aus dem NFL Next Gen Stats-Datensatz [1]. Die Erfassung erfolgt über RFID-Tracking-Chips (Zebra Technologies) in den Schulterpolstern der Spieler, die Positionsdaten mit 10 Hz aufzeichnen, aus denen Geschwindigkeit und Beschleunigung abgeleitet werden.
+
+Die Schrittfrequenz von 4 Hz entspricht den in der biomechanischen Literatur dokumentierten Werten für Sprinter: Hanon & Gajer [2] berichten Schrittfrequenzen von 4.12 Hz (Männer) und 3.99 Hz (Frauen) bei Weltklasse-400m-Läufern. Die 2. Harmonische bei 8 Hz modelliert die asymmetrische Fuss-Aufprall-Dynamik innerhalb eines Schrittzyklus (unterschiedliche Beschleunigungs- und Bremsphase pro Schritt).
+
+Das Signal wird bei 1000 Hz als exakte Ground Truth generiert und in Yards pro Sekunde (yd/s) angegeben. Dieses synthetische Modell ermöglicht eine kontrollierte Untersuchung des Sampling Theorems mit bekannter Bandbreite.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:04.836624Z', iopub.status.busy: '2026-03-04T10:42:04.836481Z', iopub.status.idle: '2026-03-04T10:42:05.410209Z', shell.execute_reply: '2026-03-04T10:42:05.409850Z'}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Laufzyklus-Modell: Parameter aus NFL-Daten und Biomechanik
+V_MEAN = 6.0  # yd/s (Sprint-Geschwindigkeit, basierend auf Williams P90)
+F_STEP = 4.0  # Hz (Schrittfrequenz beim Sprint)
+A_STEP = 0.5  # yd/s (Geschwindigkeitsoszillation pro Schritt)
+F_HARMONIC = 8.0  # Hz (2. Harmonische: Fuss-Aufprall-Asymmetrie)
+A_HARMONIC = 0.15  # yd/s (Amplitude der 2. Harmonischen)
+
+F_GT = 1000  # Hz (Ground Truth Sampling Rate)
+DURATION = 5.0  # s (Signaldauer: typische Sprint-Sequenz)
+
+# Ground Truth Signal bei 1000 Hz
+t_gt = np.arange(0, DURATION, 1.0 / F_GT)
+v_gt = (
+    V_MEAN
+    + A_STEP * np.sin(2 * np.pi * F_STEP * t_gt)
+    + A_HARMONIC * np.sin(2 * np.pi * F_HARMONIC * t_gt)
+)
+
+# Messrauschen (simuliert Sensor-Ungenauigkeit des RFID-Tracking)
+NOISE_STD = 0.03  # yd/s (~0.5% von v_mean)
+np.random.seed(42)
+v_gt = v_gt + np.random.normal(0, NOISE_STD, len(v_gt))
+
+fig, axes = plt.subplots(2, 1, figsize=(16, 6))
+
+# Gesamtes Signal
+axes[0].plot(t_gt, v_gt, color="steelblue", linewidth=0.6)
+axes[0].axhline(
+    V_MEAN,
+    color="gray",
+    linestyle="--",
+    linewidth=0.8,
+    label=f"$v_{{mean}}$ = {V_MEAN} yd/s",
+)
+axes[0].set_ylabel("Geschwindigkeit (yd/s)")
+axes[0].set_xlabel("Zeit (s)")
+axes[0].set_title(
+    "Laufzyklus-Modell | Sprint-Geschwindigkeit mit Schrittoszillationen ($f_{{GT}}$ = 1000 Hz)"
+)
+axes[0].legend(loc="upper right")
+axes[0].grid(True, alpha=0.3)
+
+# Zoom auf einzelne Schritte (0.5 s = 2 volle Schrittzyklen)
+t_zoom = (0.5, 1.5)
+mask = (t_gt >= t_zoom[0]) & (t_gt <= t_zoom[1])
+axes[1].plot(t_gt[mask], v_gt[mask], color="steelblue", linewidth=1.2)
+axes[1].axhline(V_MEAN, color="gray", linestyle="--", linewidth=0.8)
+axes[1].set_ylabel("Geschwindigkeit (yd/s)")
+axes[1].set_xlabel("Zeit (s)")
+axes[1].set_title("Zoom | 4 Schrittzyklen ($f_{{step}}$ = 4 Hz, $f_{{harm}}$ = 8 Hz)")
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"Modellparameter:")
+print(f"  Mittlere Geschwindigkeit: {V_MEAN} yd/s")
+print(f"  Schrittfrequenz: {F_STEP} Hz (Amplitude: {A_STEP} yd/s)")
+print(f"  2. Harmonische: {F_HARMONIC} Hz (Amplitude: {A_HARMONIC} yd/s)")
+print(f"  Maximale Frequenz: {F_HARMONIC} Hz")
+print(f"  Messrauschen: σ = {NOISE_STD} yd/s (additiv, normalverteilt)")
+print(f"  Ground Truth: {len(t_gt)} Samples bei {F_GT} Hz, Dauer: {DURATION} s")
+print(f"  Geschwindigkeitsbereich: {v_gt.min():.2f} bis {v_gt.max():.2f} yd/s")
+```
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:05.411983Z', iopub.status.busy: '2026-03-04T10:42:05.411914Z', iopub.status.idle: '2026-03-04T10:42:05.465068Z', shell.execute_reply: '2026-03-04T10:42:05.464555Z'}
+import pandas as pd
+
+# Parameterherleitung aus realen Williams-Daten
+williams = pd.read_csv("../data/clean/williams_speed.csv")
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.hist(
+    williams["speed_yards_per_s"],
+    bins=50,
+    color="steelblue",
+    alpha=0.7,
+    edgecolor="white",
+)
+ax.axvline(
+    V_MEAN,
+    color="red",
+    linewidth=2,
+    linestyle="--",
+    label=f"$v_{{mean}}$ = {V_MEAN} yd/s (Modell)",
+)
+
+p90 = williams["speed_yards_per_s"].quantile(0.90)
+ax.axvline(
+    p90, color="darkorange", linewidth=1.5, linestyle=":", label=f"P90 = {p90:.2f} yd/s"
+)
+
+ax.set_xlabel("Geschwindigkeit (yd/s)")
+ax.set_ylabel("Anzahl Frames")
+ax.set_title("Kyren Williams | Geschwindigkeitsverteilung (206 Spielzüge, 5664 Frames)")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+sprint_mean = williams[williams["speed_yards_per_s"] > 5]["speed_yards_per_s"].mean()
+print(
+    f"Williams Statistik: {len(williams)} Frames, {williams['play_id'].nunique()} Spielzüge"
+)
+print(f"  P90 = {p90:.2f} yd/s, Sprint-Mittel (>5 yd/s) = {sprint_mean:.2f} yd/s")
+print(f"  → Modell-Parameter: v_mean = {V_MEAN} yd/s")
+```
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:05.466162Z', iopub.status.busy: '2026-03-04T10:42:05.466079Z', iopub.status.idle: '2026-03-04T10:42:05.597654Z', shell.execute_reply: '2026-03-04T10:42:05.596977Z'}
+# Visueller Effekt verschiedener Sampling Rates auf das Laufzyklus-Signal
+preview_rates = [20, 10, 6, 4]
+
+fig, axes = plt.subplots(
+    len(preview_rates), 1, figsize=(16, 10), sharex=True, sharey=True
+)
+t_zoom_start, t_zoom_end = 0.5, 2.5
+mask_gt = (t_gt >= t_zoom_start) & (t_gt <= t_zoom_end)
+
+colors = {20: "darkblue", 10: "steelblue", 6: "goldenrod", 4: "orange"}
+
+for ax, fs in zip(axes, preview_rates):
+    step = int(F_GT / fs)
+    t_s = t_gt[::step]
+    v_s = v_gt[::step]
+    mask_s = (t_s >= t_zoom_start) & (t_s <= t_zoom_end)
+
+    ax.plot(
+        t_gt[mask_gt],
+        v_gt[mask_gt],
+        color="lightgray",
+        linewidth=1.0,
+        label="Ground Truth (1000 Hz)",
+    )
+    ax.plot(
+        t_s[mask_s], v_s[mask_s], "o-", color=colors[fs], markersize=4, linewidth=0.9
+    )
+
+    f_nyquist = fs / 2
+    regime = (
+        "über Nyquist" if fs > 16 else ("an Nyquist" if fs == 16 else "unter Nyquist")
+    )
+    ax.set_ylabel("v (yd/s)")
+    ax.set_title(
+        f"$f_s$ = {fs} Hz | $f_N$ = {f_nyquist:.0f} Hz | {regime} ($f_{{max}}$ = 8 Hz)"
+    )
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Vorschau | Laufzyklus-Signal bei verschiedenen Sampling Rates (Zoom: 0.5–2.5 s)",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Das synthetische Laufzyklus-Signal zeigt eine klare periodische Struktur mit der Grundschwingung bei 4 Hz und der 2. Harmonischen bei 8 Hz. Die Vorschau zeigt: Bei 20 Hz ($f_N$ = 10 Hz) wird das Signal exakt erfasst. Bei 10 Hz ($f_N$ = 5 Hz, NFL-Standard) geht die 8-Hz-Komponente verloren. Bei 6 Hz und darunter wird auch die 4-Hz-Schrittfrequenz zunehmend verfälscht.
+
+### Interpretation der Nyquist-Frequenz und Nyquist-Rate
+
+Das Laufzyklus-Signal enthält zwei Frequenzkomponenten: die Schrittfrequenz $f_1 = 4$ Hz und ihre 2. Harmonische $f_2 = 8$ Hz. Die maximale Signalfrequenz ist somit $f_{max} = 8$ Hz.
+
+Die **Nyquist-Rate** beträgt:
+$$f_{s,min} = 2 \cdot f_{max} = 2 \cdot 8\,\text{Hz} = 16\,\text{Hz}$$
+
+Das NFL-Tracking-System tastet mit $f_s = 10$ Hz ab. Die **Nyquist-Frequenz** des Systems ist $f_N = f_s / 2 = 5$ Hz. Die Schrittfrequenz (4 Hz) liegt unterhalb von $f_N$ und wird somit erfasst. Die 2. Harmonische (8 Hz) liegt jedoch oberhalb von $f_N$ und wird aliased. Das bedeutet: Das NFL-System kann zwar die grundlegende Schrittfrequenz messen, verliert aber Informationen über die Feinstruktur der Schrittbewegung (asymmetrisches Aufprallprofil).
+
+### Praktische Konsequenzen der Sampling Rate Wahl
+
+**Zu niedrig (< 8 Hz):** Bei Sampling Rates unter 8 Hz wird bereits die Schrittfrequenz (4 Hz) aliased. Die Schrittdynamik ist nicht mehr erkennbar. Analysten könnten keine Aussagen über Lauftechnik oder schrittbasierte Ermüdungsmuster treffen.
+
+**NFL-Standard (10 Hz):** Die Schrittfrequenz (4 Hz) wird erfasst, aber die 2. Harmonische (8 Hz) geht verloren. Für grobe Geschwindigkeitsanalysen ausreichend, für biomechanische Schrittanalysen jedoch unzureichend.
+
+**Ausreichend (≥ 16 Hz):** Alle relevanten Frequenzkomponenten werden korrekt erfasst. Höhere Rates (z.B. 100+ Hz) sind in biomechanischen Labors üblich, würden aber im NFL-Kontext das Datenvolumen drastisch erhöhen (22 Spieler × ~150 Spielzüge × 272 Spiele/Saison).
+
+## Tag 2 – Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet das **Nyquist-Shannon Sampling Theorem** auf das periodische Schrittdynamik-Signal im Kontext der NFL-Biomechanik-Analyse an. Das Theorem besagt, dass ein bandbegrenztes Signal mit maximaler Frequenz $f_{max}$ aus gleichmässig verteilten Samples exakt rekonstruiert werden kann, wenn die Sampling Rate die Bedingung $f_s > 2 \cdot f_{max}$ (Nyquist-Rate) erfüllt. Die Rekonstruktion erfolgt über Sinc-Interpolation. Zentrale Voraussetzungen sind Bandlimitierung des Signals, gleichförmige Samples und theoretisch unendliche Signaldauer. Das synthetische Laufzyklus-Modell erfüllt die Bandlimitierungs-Voraussetzung exakt, da es per Definition nur Frequenzen bei 4 Hz und 8 Hz enthält. Bei Verletzung der Sampling Rate ($f_s < 2 \cdot f_{max}$) tritt Aliasing auf. Die 8-Hz-Komponente würde dann als niederfrequentes Artefakt erscheinen und die biomechanische Schrittanalyse verfälschen.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+Das Laufzyklus-Signal ist durch folgende Modellparameter definiert:
+
+$$v(t) = v_{mean} + A_1 \cdot \sin(2\pi f_1 t) + A_2 \cdot \sin(2\pi f_2 t)$$
+
+| Parameter | Wert | Einheit | Herkunft |
+|:----------|:-----|:--------|:---------|
+| $v_{mean}$ | 6.0 | yd/s | Williams P90 Sprint-Geschwindigkeit |
+| $f_1$ | 4.0 | Hz | Schrittfrequenz beim Sprint (Biomechanik) |
+| $A_1$ | 0.5 | yd/s | Typische Geschwindigkeitsoszillation (~8% von $v_{mean}$) |
+| $f_2$ | 8.0 | Hz | 2. Harmonische ($2 \cdot f_1$, Fuss-Aufprall-Asymmetrie) |
+| $A_2$ | 0.15 | yd/s | Harmonische Amplitude (~30% von $A_1$) |
+
+**Bandbreite und Nyquist-Rate:**
+
+Die maximale Frequenz ist exakt bekannt: $f_{max} = f_2 = 8$ Hz. Daraus folgt die minimale Sampling Rate:
+
+$$f_{s,min} = 2 \cdot f_{max} = 2 \cdot 8\,\text{Hz} = 16\,\text{Hz}$$
+
+Die Ground Truth wird bei $f_{GT} = 1000$ Hz generiert (Überabtastungsfaktor: $1000/16 = 62.5$). Das NFL-Tracking-System mit $f_s = 10$ Hz liegt unter der Nyquist-Rate und kann das Signal nicht vollständig rekonstruieren.
+
+### Experimentelles Design für die nächsten Tage
+*Fokus: strukturierte Parametervariation und theoretische Vorhersage*
+
+Die **Baseline-Konfiguration** ist das Ground-Truth-Signal bei $f_{GT} = 1000$ Hz. Da das Signal synthetisch erzeugt wird, ist die Ground Truth exakt bekannt (kein Interpolations-Fehler).
+
+Der primäre Parameter ist die **Sampling Rate** $f_s$, die systematisch über folgende Werte variiert wird:
+
+| Regime | Sampling Rates | Nyquist-Frequenz | Erwartetes Verhalten |
+|:-------|:---------------|:-----------------|:---------------------|
+| Über Nyquist-Rate ($f_s > 16$ Hz) | 20 Hz | 10 Hz | Exakte Signalerfassung, beide Komponenten erhalten |
+| An der Nyquist-Rate ($f_s = 16$ Hz) | 16 Hz | 8 Hz | Grenzfall, 8-Hz-Komponente gerade noch erfasst |
+| Unter Nyquist-Rate ($f_s < 16$ Hz) | 2, 4, 6, 8, 10 Hz | 1, 2, 3, 4, 5 Hz | Progressives Aliasing |
+
+Es wird erwartet, dass bei $f_s = 10$ Hz (NFL-Standard) die 4-Hz-Komponente erhalten bleibt, aber die 8-Hz-Komponente als Alias bei 2 Hz erscheint. Bei $f_s \leq 8$ Hz wird auch die 4-Hz-Komponente verfälscht. Die Rekonstruktion erfolgt über Sinc-Interpolation zur Überprüfung des Sampling Theorems.
+
+### Methodische Limitationen und Risikofaktoren
+*Fokus: Annahmen, Stabilität und potenzielle Fehlinterpretation*
+
+Das synthetische Modell erfüllt die Voraussetzungen des Sampling Theorems (Bandlimitierung, uniforme Abtastung) per Konstruktion exakt. Die Ergebnisse zeigen daher den idealen Theoriefall. Reale Schrittdynamiken sind jedoch nicht rein sinusförmig und enthalten breitbandige Impulsanteile (Fuss-Aufprall), die über 8 Hz hinausreichen. Zudem variiert die Schrittfrequenz mit der Laufgeschwindigkeit, was im stationären Modell nicht abgebildet wird. Die Übertragbarkeit der Ergebnisse auf reale NFL-Tracking-Daten ist daher eine Idealisierung.
+
+## Tag 3 – Implementierung
+
+*Wird an Tag 3 vervollständigt.*
+
+## Tag 4 – Evaluation
+
+*Wird an Tag 4 vervollständigt.*
+
+## Tag 5 – Analyse & Kommunikation
+
+*Wird an Tag 5 vervollständigt.*
+
+# Quellenverzeichnis
+
+[1] Kaggle, "NFL Big Data Bowl 2026 - Analytics," 2026. [Online]. Verfügbar: https://www.kaggle.com/competitions/nfl-big-data-bowl-2026-analytics/overview. [Zugriff am: 9. März 2026].
+
+[2] C. Hanon und B. Gajer, "Velocity and Stride Parameters of World-Class 400-Meter Athletes Compared With Less Experienced Runners," *Journal of Strength and Conditioning Research*, INSEP, 2004. [Online]. Verfügbar: https://insep.hal.science/hal-01623755v1/document
+

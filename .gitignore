@@ -1,0 +1,8 @@
+*.zip
+CLAUDE.md
+.claude
+.idea
+.venv
+train/
+.DS_Store
+*.ipynb

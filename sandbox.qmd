@@ -1,0 +1,230 @@
+---
+jupyter: python3
+---
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import glob
+
+TARGET_PLAYERS = {
+    "Matthew Stafford": 34452,
+    "Kyren Williams": 54629,
+    "Puka Nacua": 56042,
+}
+target_nfl_ids = set(TARGET_PLAYERS.values())
+
+# Load and filter from raw data
+input_files = sorted(glob.glob("data/train/input_2023_w*.csv"))
+input_dfs = [pd.read_csv(f).query("nfl_id in @target_nfl_ids") for f in input_files]
+input_filtered = pd.concat(input_dfs, ignore_index=True)
+
+relevant_plays = input_filtered[["game_id", "play_id"]].drop_duplicates()
+
+output_files = sorted(glob.glob("data/train/output_2023_w*.csv"))
+output_dfs = [
+    pd.read_csv(f)
+    .merge(relevant_plays, on=["game_id", "play_id"])
+    .query("nfl_id in @target_nfl_ids")
+    for f in output_files
+]
+output_filtered = pd.concat(output_dfs, ignore_index=True)
+
+supplementary = pd.read_csv("data/supplementary_data.csv", low_memory=False)
+supplementary_filtered = supplementary.merge(relevant_plays, on=["game_id", "play_id"])
+
+# Remove plays with jitter > 1.0 (unrealistic speed oscillations)
+bad_plays = set()
+for name, nfl_id in TARGET_PLAYERS.items():
+    player = input_filtered[input_filtered["nfl_id"] == nfl_id]
+    for pid in player["play_id"].unique():
+        pdata = player[player["play_id"] == pid].sort_values("frame_id")
+        jitter = np.abs(np.diff(pdata["s"].values)).mean()
+        if jitter > 1.0:
+            game_id = pdata["game_id"].iloc[0]
+            bad_plays.add((game_id, pid))
+            print(
+                f"  Removed: game={game_id}, play={pid} ({name}, jitter={jitter:.3f})"
+            )
+
+bad_mask = input_filtered.apply(
+    lambda r: (r["game_id"], r["play_id"]) in bad_plays, axis=1
+)
+input_filtered = input_filtered[~bad_mask].reset_index(drop=True)
+bad_mask_out = output_filtered.apply(
+    lambda r: (r["game_id"], r["play_id"]) in bad_plays, axis=1
+)
+output_filtered = output_filtered[~bad_mask_out].reset_index(drop=True)
+bad_mask_supp = supplementary_filtered.apply(
+    lambda r: (r["game_id"], r["play_id"]) in bad_plays, axis=1
+)
+supplementary_filtered = supplementary_filtered[~bad_mask_supp].reset_index(drop=True)
+
+print(f"\nRemoved {len(bad_plays)} plays. After cleaning:")
+for name, nfl_id in TARGET_PLAYERS.items():
+    pi = input_filtered[input_filtered["nfl_id"] == nfl_id]
+    print(f"  {name}: {len(pi)} frames, {pi['play_id'].nunique()} plays")
+print(
+    f"  Total: {len(input_filtered)} input, {len(output_filtered)} output, {len(supplementary_filtered)} supplementary"
+)
+```
+
+```{python}
+import os
+
+os.makedirs("data/clean", exist_ok=True)
+
+PLAYER_FILES = {
+    34452: "stafford_speed.csv",
+    54629: "williams_speed.csv",
+    56042: "nacua_speed.csv",
+}
+
+for nfl_id, filename in PLAYER_FILES.items():
+    player = input_filtered[input_filtered["nfl_id"] == nfl_id].copy()
+    player = player.sort_values(["game_id", "play_id", "frame_id"])
+    player["time_s"] = np.round((player["frame_id"] - 1) * 0.1, 2)
+
+    out = player[["game_id", "play_id", "time_s", "s"]].rename(
+        columns={"s": "speed_yards_per_s"}
+    )
+    out.to_csv(f"data/clean/{filename}", index=False)
+    print(f"  data/clean/{filename}: {len(out)} rows, {out['play_id'].nunique()} plays")
+
+supplementary_filtered.to_csv("data/clean/supplementary.csv", index=False)
+print(f"  data/clean/supplementary.csv: {len(supplementary_filtered)} rows")
+```
+
+```{python}
+# Verify: load from saved clean CSVs and plot
+clean_files = {
+    "Matthew Stafford (QB)": "data/clean/stafford_speed.csv",
+    "Kyren Williams (RB)": "data/clean/williams_speed.csv",
+    "Puka Nacua (WR)": "data/clean/nacua_speed.csv",
+}
+
+fig, axes = plt.subplots(3, 1, figsize=(16, 12))
+for i, (label, path) in enumerate(clean_files.items()):
+    df = pd.read_csv(path)
+    n_plays = df["play_id"].nunique()
+    for _, pdata in df.groupby(["game_id", "play_id"]):
+        axes[i].plot(
+            pdata["time_s"],
+            pdata["speed_yards_per_s"],
+            color="steelblue",
+            alpha=0.15,
+            linewidth=0.5,
+        )
+    axes[i].set_xlabel("Time (s)")
+    axes[i].set_ylabel("Speed (yards/s)")
+    axes[i].set_title(f"{label} — {n_plays} plays")
+    axes[i].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+for label, path in clean_files.items():
+    df = pd.read_csv(path)
+    print(
+        f"{label}: {df['play_id'].nunique()} plays, {len(df)} frames, "
+        f"speed {df['speed_yards_per_s'].min():.2f}–{df['speed_yards_per_s'].max():.2f} yards/s"
+    )
+```
+
+```{python}
+# Alle Spielzüge von Kyren Williams als zusammenhängendes Signal plotten
+# Grün = Grenze zwischen Spielzügen, Rot = Grenze zwischen Spielen (Games)
+
+williams_df = (
+    pd.read_csv("data/clean/williams_speed.csv")
+    .sort_values(["game_id", "play_id", "time_s"])
+    .reset_index(drop=True)
+)
+
+fig, ax = plt.subplots(figsize=(18, 4), constrained_layout=True)
+
+x_cursor = 0
+play_boundaries = []
+game_boundaries = []
+
+for game_id, game_df in williams_df.groupby("game_id", sort=True):
+    for play_id, play_df in game_df.groupby("play_id", sort=True):
+        speed = play_df["speed_yards_per_s"].to_numpy()
+        x = np.arange(x_cursor, x_cursor + len(speed))
+        ax.plot(x, speed, color="steelblue", linewidth=0.9, alpha=0.9)
+
+        x_cursor += len(speed)
+        play_boundaries.append(x_cursor - 0.5)
+
+    game_boundaries.append(x_cursor - 0.5)
+
+# Letzte Grenze entfernen (kein Separator nach dem letzten Segment)
+if play_boundaries:
+    play_boundaries = play_boundaries[:-1]
+if game_boundaries:
+    game_boundaries = game_boundaries[:-1]
+
+for i, xb in enumerate(play_boundaries):
+    ax.axvline(
+        xb,
+        color="green",
+        linewidth=0.8,
+        alpha=0.3,
+        label="Spielzug-Grenze" if i == 0 else None,
+    )
+
+for i, xb in enumerate(game_boundaries):
+    ax.axvline(
+        xb,
+        color="red",
+        linewidth=1.8,
+        alpha=0.9,
+        label="Spiel-Grenze" if i == 0 else None,
+    )
+
+n_games = williams_df["game_id"].nunique()
+n_plays = williams_df["play_id"].nunique()
+
+ax.set_title(f"Kyren Williams — {n_plays} Spielzüge über {n_games} Spiele")
+ax.set_xlabel("Konkatenierte Frames (10 Hz)")
+ax.set_ylabel("Speed (yards/s)")
+ax.grid(True, alpha=0.25)
+ax.legend(loc="upper right")
+
+plt.show()
+```
+
+```{python}
+# Zoom-Plot für das 1. Spiel als eigene Figure
+first_game_id = williams_df["game_id"].iloc[0]
+first_game_df = williams_df[williams_df["game_id"] == first_game_id].copy()
+
+fig, ax = plt.subplots(figsize=(18, 4), constrained_layout=True)
+
+x_cursor = 0
+boundaries = []
+
+for play_id, play_df in first_game_df.groupby("play_id", sort=True):
+    speed = play_df["speed_yards_per_s"].to_numpy()
+    x = np.arange(x_cursor, x_cursor + len(speed))
+    ax.plot(x, speed, color="steelblue", linewidth=0.9, alpha=0.9)
+
+    x_cursor += len(speed)
+    boundaries.append(x_cursor - 0.5)
+
+# letzte Grenze nicht zeichnen
+for xb in boundaries[:-1]:
+    ax.axvline(xb, color="green", linewidth=0.8, alpha=0.3)
+
+ax.set_title(f"Kyren Williams — 1. Spiel (game_id={first_game_id})")
+ax.set_xlabel("Konkatenierte Frames (10 Hz)")
+ax.set_ylabel("Speed (yards/s)")
+ax.grid(True, alpha=0.25)
+
+if x_cursor > 0:
+    ax.set_xlim(-0.5, x_cursor - 0.5)
+
+plt.show()
+```
+
