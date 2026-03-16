@@ -464,10 +464,21 @@ plt.tight_layout()
 plt.show()
 ```
 
-### Frequenzbereich-Analyse
-*Fokus: Spektrale Darstellung und Aliasing-Nachweis*
+### Frequenzbereich-Analyse und Aliasing-Nachweis
+*Fokus: Spektrale Darstellung und explizite Aliasing-Verifikation*
 
-Im Frequenzbereich wird sichtbar, welche Frequenzkomponenten bei niedrigen Sampling Rates erhalten bleiben und wo Aliasing-Artefakte auftreten. Die 8-Hz-Komponente sollte bei Sampling Rates unter 16 Hz als Alias-Frequenz $f_{alias} = f_s - f_{signal}$ erscheinen.
+Im Frequenzbereich wird sichtbar, welche Frequenzkomponenten bei niedrigen Sampling Rates erhalten bleiben und wo Aliasing-Artefakte auftreten.
+
+**Alias-Faltungsformel:** Wenn eine Signalfrequenz $f_{signal}$ mit einer Sampling Rate $f_s$ abgetastet wird, erscheint sie im diskreten Spektrum bei der Alias-Frequenz:
+
+$$f_{alias} = f_{signal} \bmod f_s, \quad \text{gefaltet in } [0,\, f_s/2]$$
+
+Falls $f_{alias} > f_s/2$, wird zusätzlich gespiegelt: $f_{alias} = f_s - f_{alias}$. Die Alias-Frequenz ist somit immer innerhalb des darstellbaren Frequenzbereichs $[0, f_N]$.
+
+**Beispiel:** Die 8-Hz-Komponente bei $f_s = 10$ Hz:
+$$f_{alias} = 8 \bmod 10 = 8 > f_N = 5 \implies f_{alias} = 10 - 8 = 2\,\text{Hz}$$
+
+Die 8-Hz-Harmonische erscheint also als Alias bei 2 Hz — ein niederfrequentes Artefakt, das als langsamere Oszillation fehlinterpretiert werden könnte.
 
 ```{python}
 def compute_amplitude_spectrum(signal, fs, remove_dc=True):
@@ -481,10 +492,26 @@ def compute_amplitude_spectrum(signal, fs, remove_dc=True):
     return freqs, amplitudes
 
 
-fig, axes = plt.subplots(4, 2, figsize=(16, 14))
+def compute_alias_freq(f_signal, fs):
+    """Berechnet die Alias-Frequenz einer Signalfrequenz bei gegebener Sampling Rate.
+
+    Wendet die Modulo-Faltungsformel an: f_alias = f_signal mod fs,
+    dann in [0, fs/2] spiegeln.
+    """
+    f_alias = f_signal % fs
+    if f_alias > fs / 2:
+        f_alias = fs - f_alias
+    return f_alias
+
+
+# Signalkomponenten für Aliasing-Analyse
+signal_freqs = [F_STEP, F_HARMONIC]
+signal_labels = ["$f_1$ (4 Hz)", "$f_2$ (8 Hz)"]
+alias_markers = ["green", "limegreen"]
+
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
 axes_flat = axes.flatten()
 
-# Nur die ersten 7 Subplots verwenden (7 Sampling Rates), letzten ausblenden
 for i, (ax, fs) in enumerate(zip(axes_flat[:7], sampling_rates)):
     t_s, v_s = sampled_signals[fs]
     freqs_s, amps_s = compute_amplitude_spectrum(v_s, fs)
@@ -500,17 +527,43 @@ for i, (ax, fs) in enumerate(zip(axes_flat[:7], sampling_rates)):
         label=f"$f_N$ = {f_nyquist:.0f} Hz",
     )
 
-    # Erwartete Alias-Frequenz der 8-Hz-Komponente markieren
+    # Alias-Annotationen für unterabgetastete Rates
     if fs < 16:
-        f_alias = abs(fs - F_HARMONIC) if fs > F_HARMONIC else F_HARMONIC % fs
-        # Alias in den darstellbaren Bereich falten
-        f_alias_folded = F_HARMONIC
-        while f_alias_folded > f_nyquist:
-            f_alias_folded = (
-                abs(fs - f_alias_folded) if f_alias_folded > fs / 2 else f_alias_folded
-            )
-            if f_alias_folded > f_nyquist:
-                f_alias_folded = fs - f_alias_folded
+        annotation_y_offset = 0
+        for f_sig, f_label, acolor in zip(signal_freqs, signal_labels, alias_markers):
+            f_alias = compute_alias_freq(f_sig, fs)
+            # Nur annotieren wenn Aliasing vorliegt (Originalfrequenz > f_nyquist)
+            if f_sig > f_nyquist:
+                ax.axvline(
+                    f_alias,
+                    color=acolor,
+                    linestyle=":",
+                    linewidth=1.5,
+                    alpha=0.8,
+                )
+                ax.annotate(
+                    f"{f_sig:.0f} Hz → {f_alias:.0f} Hz",
+                    xy=(f_alias, ax.get_ylim()[1] * 0.7 - annotation_y_offset),
+                    fontsize=8,
+                    fontweight="bold",
+                    color="darkgreen",
+                    ha="center",
+                    bbox=dict(
+                        boxstyle="round,pad=0.2", facecolor="lightyellow", alpha=0.8
+                    ),
+                )
+                annotation_y_offset += ax.get_ylim()[1] * 0.15
+    elif fs >= 16:
+        # Originalfrequenzen markieren (korrekt erfasst)
+        for f_sig, f_label in zip(signal_freqs, signal_labels):
+            if f_sig <= f_nyquist:
+                ax.annotate(
+                    f"{f_sig:.0f} Hz ✓",
+                    xy=(f_sig, ax.get_ylim()[1] * 0.7),
+                    fontsize=8,
+                    color="darkblue",
+                    ha="center",
+                )
 
     ax.set_ylabel("Amplitude (yd/s)")
     ax.set_title(f"$f_s$ = {fs} Hz | {get_regime(fs)}")
@@ -518,13 +571,62 @@ for i, (ax, fs) in enumerate(zip(axes_flat[:7], sampling_rates)):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
-# Letzten Subplot ausblenden
 axes_flat[7].set_visible(False)
-
 axes[3, 0].set_xlabel("Frequenz (Hz)")
-fig.suptitle("Amplitudenspektren bei verschiedenen Sampling Rates", fontsize=13, y=1.01)
+axes[3, 1].set_xlabel("Frequenz (Hz)")
+fig.suptitle(
+    "Amplitudenspektren | Alias-Frequenzen annotiert (grün = Alias)",
+    fontsize=13,
+    y=1.01,
+)
 plt.tight_layout()
 plt.show()
+```
+
+```{python}
+# Aliasing-Verifikationstabelle: Erwartete vs. beobachtete Alias-Frequenzen
+print("Aliasing-Verifikation | Erwartete vs. beobachtete Alias-Frequenzen")
+print("=" * 85)
+print(
+    f"{'fs (Hz)':>8} | {'f_N (Hz)':>8} | {'Komponente':>12} | {'Erwartet (Hz)':>14} | {'Beobachtet (Hz)':>16} | {'Status':>10}"
+)
+print("-" * 85)
+
+for fs in sampling_rates:
+    t_s, v_s = sampled_signals[fs]
+    freqs_s, amps_s = compute_amplitude_spectrum(v_s, fs)
+    f_nyquist = fs / 2
+
+    for f_sig, label in [(F_STEP, "4 Hz (f1)"), (F_HARMONIC, "8 Hz (f2)")]:
+        f_alias_expected = compute_alias_freq(f_sig, fs)
+
+        # Beobachteten Peak finden: Amplitude im Bereich +/-0.5 Hz um erwartete Alias-Frequenz
+        mask_peak = np.abs(freqs_s - f_alias_expected) < 0.5
+        if np.any(mask_peak):
+            peak_idx = np.argmax(amps_s[mask_peak])
+            f_observed = freqs_s[mask_peak][peak_idx]
+            amp_observed = amps_s[mask_peak][peak_idx]
+        else:
+            f_observed = float("nan")
+            amp_observed = 0.0
+
+        aliased = f_sig > f_nyquist
+        match_ok = abs(f_observed - f_alias_expected) < 0.5 and amp_observed > 0.01
+
+        if not aliased:
+            status = "korrekt"
+        elif match_ok:
+            status = "Alias"
+        else:
+            status = "---"
+
+        print(
+            f"{fs:>8} | {f_nyquist:>8.0f} | {label:>12} | {f_alias_expected:>13.1f}  | {f_observed:>15.1f}  | {status:>10}"
+        )
+
+print("=" * 85)
+print("'korrekt' = Originalfrequenz liegt unter f_N, wird korrekt erfasst")
+print("'Alias'   = Originalfrequenz liegt ueber f_N, erscheint als Alias-Frequenz")
 ```
 
 ### Aliasing-Demonstration durch Sinc-Rekonstruktion
@@ -660,10 +762,6 @@ for fs, rmse, maxe in zip(sampling_rates, rmse_values, max_errors):
         f"  f_s = {fs:2d} Hz | RMSE = {rmse:.4f} yd/s | Max = {maxe:.4f} yd/s | {get_regime(fs)}"
     )
 ```
-
-# Erweitern
-- Random Noise hinzufügen wenn möglich mit Convolution
-- 
 
 ## Tag 4 – Evaluation
 
