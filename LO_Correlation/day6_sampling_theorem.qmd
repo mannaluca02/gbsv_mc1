@@ -1,0 +1,1260 @@
+---
+title: GBSV MC1 – Sampling Theorem
+author: Luca Manna
+date: '2026-03-09'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Sampling Theorem
+
+**Name:** Luca Manna  
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 1 – Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+Im Bereich der NFL-Leistungsanalyse werden Bewegungssignale von Spielern mithilfe von RFID-Tracking-Chips (Zebra Technologies) in den Schulterpolstern mit 10 Hz abgetastet. Beim Sprinten erzeugt jeder Schritt eines Spielers eine periodische Geschwindigkeitsoszillation (Stride Dynamics). Diese Schrittmuster enthalten Informationen über Lauftechnik, Ermüdung und Verletzungsrisiko und sind besonders relevant für Running Backs, die pro Spiel zahlreiche Sprints ausführen. Dieser Anwendungsfall ist relevant für die USA, da die NFL das grösste Tracking-Datenprogramm im Profisport betreibt (Next Gen Stats) und alle 32 Teams diese Daten zur Leistungsoptimierung nutzen.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der Bestimmung einer geeigneten Sampling Rate für die Erfassung von Schrittdynamiken (Stride Dynamics) eines NFL Running Backs während Sprints. Wird die Sampling Rate zu niedrig gewählt, können die periodischen Geschwindigkeitsoszillationen durch Aliasing verfälscht werden. Höhere harmonische Anteile der Schrittbewegung werden dann als niederfrequente Artefakte fehlinterpretiert. Wird sie zu hoch gewählt, entsteht unnötiges Datenvolumen ohne zusätzlichen Informationsgewinn. Die korrekte Erfassung der Schrittfrequenz und ihrer Harmonischen ist entscheidend für eine zuverlässige biomechanische Analyse.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Ziel ist es zu untersuchen, wie die Wahl der Sampling Rate die Genauigkeit beeinflusst, mit der periodische Schrittdynamiken eines sprintenden NFL Running Backs erfasst werden. Es soll bestimmt werden, ab welcher Sampling Rate Aliasing-Artefakte auftreten und die Schrittfrequenz nicht mehr korrekt rekonstruiert werden kann.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Das Signal modelliert die momentane Geschwindigkeit eines sprintenden NFL Running Backs mit überlagerten Schrittoszillationen. Die Modellparameter basieren auf realen Tracking-Daten von Kyren Williams (LA Rams, Saison 2023, 206 Spielzüge, Sprint-Geschwindigkeit P90 = 5.93 yd/s) aus dem NFL Next Gen Stats-Datensatz [1]. Die Erfassung erfolgt über RFID-Tracking-Chips (Zebra Technologies) in den Schulterpolstern der Spieler, die Positionsdaten mit 10 Hz aufzeichnen, aus denen Geschwindigkeit und Beschleunigung abgeleitet werden.
+
+Die Schrittfrequenz von 4 Hz entspricht den in der biomechanischen Literatur dokumentierten Werten für Sprinter: Hanon & Gajer [2] berichten Schrittfrequenzen von 4.12 Hz (Männer) und 3.99 Hz (Frauen) bei Weltklasse-400m-Läufern. Die 2. Harmonische bei 8 Hz modelliert die asymmetrische Fuss-Aufprall-Dynamik innerhalb eines Schrittzyklus (unterschiedliche Beschleunigungs- und Bremsphase pro Schritt).
+
+Das Signal wird bei 1000 Hz als exakte Ground Truth generiert und in Yards pro Sekunde (yd/s) angegeben. Dieses synthetische Modell ermöglicht eine kontrollierte Untersuchung des Sampling Theorems mit bekannter Bandbreite.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:04.836624Z', iopub.status.busy: '2026-03-04T10:42:04.836481Z', iopub.status.idle: '2026-03-04T10:42:05.410209Z', shell.execute_reply: '2026-03-04T10:42:05.409850Z'}
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Laufzyklus-Modell: Parameter aus NFL-Daten und Biomechanik
+V_MEAN = 6.0  # yd/s (Sprint-Geschwindigkeit, basierend auf Williams P90)
+F_STEP = 4.0  # Hz (Schrittfrequenz beim Sprint)
+A_STEP = 0.5  # yd/s (Geschwindigkeitsoszillation pro Schritt)
+F_HARMONIC = 8.0  # Hz (2. Harmonische: Fuss-Aufprall-Asymmetrie)
+A_HARMONIC = 0.15  # yd/s (Amplitude der 2. Harmonischen)
+
+F_GT = 1000  # Hz (Ground Truth Sampling Rate)
+DURATION = 5.0  # s (Signaldauer: typische Sprint-Sequenz)
+
+# Ground Truth Signal bei 1000 Hz
+t_gt = np.arange(0, DURATION, 1.0 / F_GT)
+v_gt = (
+    V_MEAN
+    + A_STEP * np.sin(2 * np.pi * F_STEP * t_gt)
+    + A_HARMONIC * np.sin(2 * np.pi * F_HARMONIC * t_gt)
+)
+
+# Messrauschen (simuliert Sensor-Ungenauigkeit des RFID-Tracking)
+NOISE_STD = 0.03  # yd/s (~0.5% von v_mean)
+np.random.seed(42)
+v_gt = v_gt + np.random.normal(0, NOISE_STD, len(v_gt))
+
+fig, axes = plt.subplots(2, 1, figsize=(16, 6))
+
+# Gesamtes Signal
+axes[0].plot(t_gt, v_gt, color="steelblue", linewidth=0.6)
+axes[0].axhline(
+    V_MEAN,
+    color="gray",
+    linestyle="--",
+    linewidth=0.8,
+    label=f"$v_{{mean}}$ = {V_MEAN} yd/s",
+)
+axes[0].set_ylabel("Geschwindigkeit (yd/s)")
+axes[0].set_xlabel("Zeit (s)")
+axes[0].set_title(
+    "Laufzyklus-Modell | Sprint-Geschwindigkeit mit Schrittoszillationen ($f_{{GT}}$ = 1000 Hz)"
+)
+axes[0].legend(loc="upper right")
+axes[0].grid(True, alpha=0.3)
+
+# Zoom auf einzelne Schritte (0.5 s = 2 volle Schrittzyklen)
+t_zoom = (0.5, 1.5)
+mask = (t_gt >= t_zoom[0]) & (t_gt <= t_zoom[1])
+axes[1].plot(t_gt[mask], v_gt[mask], color="steelblue", linewidth=1.2)
+axes[1].axhline(V_MEAN, color="gray", linestyle="--", linewidth=0.8)
+axes[1].set_ylabel("Geschwindigkeit (yd/s)")
+axes[1].set_xlabel("Zeit (s)")
+axes[1].set_title("Zoom | 4 Schrittzyklen ($f_{{step}}$ = 4 Hz, $f_{{harm}}$ = 8 Hz)")
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"Modellparameter:")
+print(f"  Mittlere Geschwindigkeit: {V_MEAN} yd/s")
+print(f"  Schrittfrequenz: {F_STEP} Hz (Amplitude: {A_STEP} yd/s)")
+print(f"  2. Harmonische: {F_HARMONIC} Hz (Amplitude: {A_HARMONIC} yd/s)")
+print(f"  Maximale Frequenz: {F_HARMONIC} Hz")
+print(f"  Messrauschen: σ = {NOISE_STD} yd/s (additiv, normalverteilt)")
+print(f"  Ground Truth: {len(t_gt)} Samples bei {F_GT} Hz, Dauer: {DURATION} s")
+print(f"  Geschwindigkeitsbereich: {v_gt.min():.2f} bis {v_gt.max():.2f} yd/s")
+```
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:05.411983Z', iopub.status.busy: '2026-03-04T10:42:05.411914Z', iopub.status.idle: '2026-03-04T10:42:05.465068Z', shell.execute_reply: '2026-03-04T10:42:05.464555Z'}
+import pandas as pd
+
+# Parameterherleitung aus realen Williams-Daten
+williams = pd.read_csv("../data/clean/williams_speed.csv")
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.hist(
+    williams["speed_yards_per_s"],
+    bins=50,
+    color="steelblue",
+    alpha=0.7,
+    edgecolor="white",
+)
+ax.axvline(
+    V_MEAN,
+    color="red",
+    linewidth=2,
+    linestyle="--",
+    label=f"$v_{{mean}}$ = {V_MEAN} yd/s (Modell)",
+)
+
+p90 = williams["speed_yards_per_s"].quantile(0.90)
+ax.axvline(
+    p90, color="darkorange", linewidth=1.5, linestyle=":", label=f"P90 = {p90:.2f} yd/s"
+)
+
+ax.set_xlabel("Geschwindigkeit (yd/s)")
+ax.set_ylabel("Anzahl Frames")
+ax.set_title("Kyren Williams | Geschwindigkeitsverteilung (206 Spielzüge, 5664 Frames)")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+sprint_mean = williams[williams["speed_yards_per_s"] > 5]["speed_yards_per_s"].mean()
+print(
+    f"Williams Statistik: {len(williams)} Frames, {williams['play_id'].nunique()} Spielzüge"
+)
+print(f"  P90 = {p90:.2f} yd/s, Sprint-Mittel (>5 yd/s) = {sprint_mean:.2f} yd/s")
+print(f"  → Modell-Parameter: v_mean = {V_MEAN} yd/s")
+```
+
+```{python}
+#| execution: {iopub.execute_input: '2026-03-04T10:42:05.466162Z', iopub.status.busy: '2026-03-04T10:42:05.466079Z', iopub.status.idle: '2026-03-04T10:42:05.597654Z', shell.execute_reply: '2026-03-04T10:42:05.596977Z'}
+# Visueller Effekt verschiedener Sampling Rates auf das Laufzyklus-Signal
+preview_rates = [20, 10, 6, 4]
+
+fig, axes = plt.subplots(
+    len(preview_rates), 1, figsize=(16, 10), sharex=True, sharey=True
+)
+t_zoom_start, t_zoom_end = 0.5, 2.5
+mask_gt = (t_gt >= t_zoom_start) & (t_gt <= t_zoom_end)
+
+colors = {20: "darkblue", 10: "steelblue", 6: "goldenrod", 4: "orange"}
+
+for ax, fs in zip(axes, preview_rates):
+    step = int(F_GT / fs)
+    t_s = t_gt[::step]
+    v_s = v_gt[::step]
+    mask_s = (t_s >= t_zoom_start) & (t_s <= t_zoom_end)
+
+    ax.plot(
+        t_gt[mask_gt],
+        v_gt[mask_gt],
+        color="lightgray",
+        linewidth=1.0,
+        label="Ground Truth (1000 Hz)",
+    )
+    ax.plot(
+        t_s[mask_s], v_s[mask_s], "o-", color=colors[fs], markersize=4, linewidth=0.9
+    )
+
+    f_nyquist = fs / 2
+    regime = (
+        "über Nyquist" if fs > 16 else ("an Nyquist" if fs == 16 else "unter Nyquist")
+    )
+    ax.set_ylabel("v (yd/s)")
+    ax.set_title(
+        f"$f_s$ = {fs} Hz | $f_N$ = {f_nyquist:.0f} Hz | {regime} ($f_{{max}}$ = 8 Hz)"
+    )
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Vorschau | Laufzyklus-Signal bei verschiedenen Sampling Rates (Zoom: 0.5–2.5 s)",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Das synthetische Laufzyklus-Signal zeigt eine klare periodische Struktur mit der Grundschwingung bei 4 Hz und der 2. Harmonischen bei 8 Hz. Die Vorschau zeigt: Bei 20 Hz ($f_N$ = 10 Hz) wird das Signal exakt erfasst. Bei 10 Hz ($f_N$ = 5 Hz, NFL-Standard) geht die 8-Hz-Komponente verloren. Bei 6 Hz und darunter wird auch die 4-Hz-Schrittfrequenz zunehmend verfälscht.
+
+### Interpretation der Nyquist-Frequenz und Nyquist-Rate
+
+Das Laufzyklus-Signal enthält zwei Frequenzkomponenten: die Schrittfrequenz $f_1 = 4$ Hz und ihre 2. Harmonische $f_2 = 8$ Hz. Die maximale Signalfrequenz ist somit $f_{max} = 8$ Hz.
+
+Die **Nyquist-Rate** beträgt:
+$$f_{s,min} = 2 \cdot f_{max} = 2 \cdot 8\,\text{Hz} = 16\,\text{Hz}$$
+
+Das NFL-Tracking-System tastet mit $f_s = 10$ Hz ab. Die **Nyquist-Frequenz** des Systems ist $f_N = f_s / 2 = 5$ Hz. Die Schrittfrequenz (4 Hz) liegt unterhalb von $f_N$ und wird somit erfasst. Die 2. Harmonische (8 Hz) liegt jedoch oberhalb von $f_N$ und wird aliased. Das bedeutet: Das NFL-System kann zwar die grundlegende Schrittfrequenz messen, verliert aber Informationen über die Feinstruktur der Schrittbewegung (asymmetrisches Aufprallprofil).
+
+### Praktische Konsequenzen der Sampling Rate Wahl
+
+**Zu niedrig (< 8 Hz):** Bei Sampling Rates unter 8 Hz wird bereits die Schrittfrequenz (4 Hz) aliased. Die Schrittdynamik ist nicht mehr erkennbar. Analysten könnten keine Aussagen über Lauftechnik oder schrittbasierte Ermüdungsmuster treffen.
+
+**NFL-Standard (10 Hz):** Die Schrittfrequenz (4 Hz) wird erfasst, aber die 2. Harmonische (8 Hz) geht verloren. Für grobe Geschwindigkeitsanalysen ausreichend, für biomechanische Schrittanalysen jedoch unzureichend.
+
+**Ausreichend (≥ 16 Hz):** Alle relevanten Frequenzkomponenten werden korrekt erfasst. Höhere Rates (z.B. 100+ Hz) sind in biomechanischen Labors üblich, würden aber im NFL-Kontext das Datenvolumen drastisch erhöhen (22 Spieler × ~150 Spielzüge × 272 Spiele/Saison).
+
+## Tag 2 – Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet das **Nyquist-Shannon Sampling Theorem** auf das periodische Schrittdynamik-Signal im Kontext der NFL-Biomechanik-Analyse an. Das Theorem besagt, dass ein bandbegrenztes Signal mit maximaler Frequenz $f_{max}$ aus gleichmässig verteilten Samples exakt rekonstruiert werden kann, wenn die Sampling Rate die Bedingung $f_s > 2 \cdot f_{max}$ (Nyquist-Rate) erfüllt. Die Rekonstruktion erfolgt über Sinc-Interpolation. Zentrale Voraussetzungen sind Bandlimitierung des Signals, gleichförmige Samples und theoretisch unendliche Signaldauer. Das synthetische Laufzyklus-Modell erfüllt die Bandlimitierungs-Voraussetzung exakt, da es per Definition nur Frequenzen bei 4 Hz und 8 Hz enthält. Bei Verletzung der Sampling Rate ($f_s < 2 \cdot f_{max}$) tritt Aliasing auf. Die 8-Hz-Komponente würde dann als niederfrequentes Artefakt erscheinen und die biomechanische Schrittanalyse verfälschen.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+Das Laufzyklus-Signal ist durch folgende Modellparameter definiert:
+
+$$v(t) = v_{mean} + A_1 \cdot \sin(2\pi f_1 t) + A_2 \cdot \sin(2\pi f_2 t)$$
+
+| Parameter | Wert | Einheit | Herkunft |
+|:----------|:-----|:--------|:---------|
+| $v_{mean}$ | 6.0 | yd/s | Williams P90 Sprint-Geschwindigkeit |
+| $f_1$ | 4.0 | Hz | Schrittfrequenz beim Sprint (Biomechanik) |
+| $A_1$ | 0.5 | yd/s | Typische Geschwindigkeitsoszillation (~8% von $v_{mean}$) |
+| $f_2$ | 8.0 | Hz | 2. Harmonische ($2 \cdot f_1$, Fuss-Aufprall-Asymmetrie) |
+| $A_2$ | 0.15 | yd/s | Harmonische Amplitude (~30% von $A_1$) |
+
+**Bandbreite und Nyquist-Rate:**
+
+Die maximale Frequenz ist exakt bekannt: $f_{max} = f_2 = 8$ Hz. Daraus folgt die minimale Sampling Rate:
+
+$$f_{s,min} = 2 \cdot f_{max} = 2 \cdot 8\,\text{Hz} = 16\,\text{Hz}$$
+
+Die Ground Truth wird bei $f_{GT} = 1000$ Hz generiert (Überabtastungsfaktor: $1000/16 = 62.5$). Das NFL-Tracking-System mit $f_s = 10$ Hz liegt unter der Nyquist-Rate und kann das Signal nicht vollständig rekonstruieren.
+
+### Experimentelles Design für die nächsten Tage
+*Fokus: strukturierte Parametervariation und theoretische Vorhersage*
+
+Die **Baseline-Konfiguration** ist das Ground-Truth-Signal bei $f_{GT} = 1000$ Hz. Da das Signal synthetisch erzeugt wird, ist die Ground Truth exakt bekannt (kein Interpolations-Fehler).
+
+Der primäre Parameter ist die **Sampling Rate** $f_s$, die systematisch über folgende Werte variiert wird:
+
+| Regime | Sampling Rates | Nyquist-Frequenz | Erwartetes Verhalten |
+|:-------|:---------------|:-----------------|:---------------------|
+| Über Nyquist-Rate ($f_s > 16$ Hz) | 20 Hz | 10 Hz | Exakte Signalerfassung, beide Komponenten erhalten |
+| An der Nyquist-Rate ($f_s = 16$ Hz) | 16 Hz | 8 Hz | Grenzfall, 8-Hz-Komponente gerade noch erfasst |
+| Unter Nyquist-Rate ($f_s < 16$ Hz) | 2, 4, 6, 8, 10 Hz | 1, 2, 3, 4, 5 Hz | Progressives Aliasing |
+
+Es wird erwartet, dass bei $f_s = 10$ Hz (NFL-Standard) die 4-Hz-Komponente erhalten bleibt, aber die 8-Hz-Komponente als Alias bei 2 Hz erscheint. Bei $f_s \leq 8$ Hz wird auch die 4-Hz-Komponente verfälscht. Die Rekonstruktion erfolgt über Sinc-Interpolation zur Überprüfung des Sampling Theorems.
+
+### Methodische Limitationen und Risikofaktoren
+*Fokus: Annahmen, Stabilität und potenzielle Fehlinterpretation*
+
+Das synthetische Modell erfüllt die Voraussetzungen des Sampling Theorems (Bandlimitierung, uniforme Abtastung) per Konstruktion exakt. Die Ergebnisse zeigen daher den idealen Theoriefall. Reale Schrittdynamiken sind jedoch nicht rein sinusförmig und enthalten breitbandige Impulsanteile (Fuss-Aufprall), die über 8 Hz hinausreichen. Zudem variiert die Schrittfrequenz mit der Laufgeschwindigkeit, was im stationären Modell nicht abgebildet wird. Die Übertragbarkeit der Ergebnisse auf reale NFL-Tracking-Daten ist daher eine Idealisierung.
+
+## Tag 3 – Implementierung
+
+### Ground-Truth-Signal
+*Fokus: exakte Referenz für die Abtastexperimente*
+
+Das synthetische Laufzyklus-Signal wird bei $f_{GT} = 1000$ Hz generiert. Da es per Definition bandbegrenzt ist ($f_{max} = 8$ Hz), dient es als exakte Ground Truth ohne Interpolations-Fehler.
+
+```{python}
+# Ground Truth: Laufzyklus-Signal bei 1000 Hz (aus Tag 1 übernommen)
+# Die Modellparameter V_MEAN, F_STEP, A_STEP, F_HARMONIC, A_HARMONIC, F_GT, DURATION
+# sowie t_gt und v_gt sind bereits definiert.
+
+# Frequenzspektrum der Ground Truth
+N_gt = len(v_gt)
+fft_gt = np.fft.rfft(v_gt - V_MEAN)  # DC-Anteil entfernen für klareres Spektrum
+freqs_gt = np.fft.rfftfreq(N_gt, d=1.0 / F_GT)
+amps_gt = 2.0 / N_gt * np.abs(fft_gt)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4))
+
+# Zeitbereich (Zoom)
+mask = (t_gt >= 0.5) & (t_gt <= 2.0)
+ax1.plot(t_gt[mask], v_gt[mask], color="steelblue", linewidth=1.0)
+ax1.axhline(V_MEAN, color="gray", linestyle="--", linewidth=0.8)
+ax1.set_xlabel("Zeit (s)")
+ax1.set_ylabel("Geschwindigkeit (yd/s)")
+ax1.set_title("Ground Truth | Zeitbereich (Zoom)")
+ax1.grid(True, alpha=0.3)
+
+# Frequenzbereich
+ax2.stem(
+    freqs_gt[:50], amps_gt[:50], linefmt="steelblue", markerfmt="o", basefmt="gray"
+)
+ax2.set_xlabel("Frequenz (Hz)")
+ax2.set_ylabel("Amplitude (yd/s)")
+ax2.set_title("Ground Truth | Frequenzspektrum")
+ax2.set_xlim(-0.5, 15)
+ax2.annotate(
+    f"$f_1$ = {F_STEP} Hz",
+    xy=(F_STEP, A_STEP / 2),
+    fontsize=9,
+    xytext=(F_STEP + 1, A_STEP / 2 + 0.05),
+    arrowprops=dict(arrowstyle="->"),
+)
+ax2.annotate(
+    f"$f_2$ = {F_HARMONIC} Hz",
+    xy=(F_HARMONIC, A_HARMONIC / 2),
+    fontsize=9,
+    xytext=(F_HARMONIC + 1, A_HARMONIC / 2 + 0.05),
+    arrowprops=dict(arrowstyle="->"),
+)
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"Ground Truth: {len(t_gt)} Samples bei {F_GT} Hz")
+print(
+    f"Frequenzkomponenten: {F_STEP} Hz (A={A_STEP} yd/s), {F_HARMONIC} Hz (A={A_HARMONIC} yd/s)"
+)
+print(f"Bandbreite: f_max = {F_HARMONIC} Hz, Nyquist-Rate = {2 * F_HARMONIC} Hz")
+```
+
+### Systematische Abtastung bei verschiedenen Sampling Rates
+*Fokus: strukturierte Parametervariation im Zeitbereich*
+
+Das Ground-Truth-Signal wird bei sieben Sampling Rates abgetastet, die drei Regime abdecken: über der Nyquist-Rate (20 Hz), an der Nyquist-Rate (16 Hz) und unter der Nyquist-Rate (2, 4, 6, 8, 10 Hz). Die Abtastung erfolgt durch gleichmässiges Dezimieren des Ground-Truth-Signals.
+
+```{python}
+sampling_rates = [2, 4, 6, 8, 10, 16, 20]
+
+# Abtastung des Ground-Truth-Signals
+sampled_signals = {}
+for fs in sampling_rates:
+    step = int(F_GT / fs)
+    t_sampled = t_gt[::step]
+    v_sampled = v_gt[::step]
+    sampled_signals[fs] = (t_sampled, v_sampled)
+
+# Zeitbereich-Visualisierung (Zoom auf 0.5–2.5 s)
+fig, axes = plt.subplots(
+    len(sampling_rates),
+    1,
+    figsize=(16, 3 * len(sampling_rates)),
+    sharex=True,
+    sharey=True,
+)
+
+regime_colors = {
+    2: "darkred",
+    4: "crimson",
+    6: "orange",
+    8: "goldenrod",
+    10: "steelblue",
+    16: "royalblue",
+    20: "darkblue",
+}
+
+
+def get_regime(fs, nyquist_rate=16):
+    if fs > nyquist_rate:
+        return "über Nyquist"
+    elif fs == nyquist_rate:
+        return "an Nyquist"
+    return "unter Nyquist"
+
+
+t_zoom = (0.5, 2.5)
+mask_gt_zoom = (t_gt >= t_zoom[0]) & (t_gt <= t_zoom[1])
+
+for ax, fs in zip(axes, sampling_rates):
+    t_s, v_s = sampled_signals[fs]
+    mask_s = (t_s >= t_zoom[0]) & (t_s <= t_zoom[1])
+
+    ax.plot(t_gt[mask_gt_zoom], v_gt[mask_gt_zoom], color="lightgray", linewidth=1.0)
+    ax.plot(
+        t_s[mask_s],
+        v_s[mask_s],
+        "o-",
+        color=regime_colors[fs],
+        markersize=3,
+        linewidth=0.8,
+    )
+
+    ax.set_ylabel("v (yd/s)")
+    ax.set_title(
+        f"$f_s$ = {fs} Hz | $f_N$ = {fs/2:.0f} Hz | {get_regime(fs)} | {len(t_s)} Samples"
+    )
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Laufzyklus-Signal | Abtastung bei verschiedenen Sampling Rates (Zoom: 0.5–2.5 s)",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Detail-Ansicht: 3 repräsentative Sampling Rates im direkten Vergleich
+# Über Nyquist (20 Hz) vs. NFL-Standard (10 Hz) vs. Unter Nyquist (4 Hz)
+detail_rates = [20, 10, 4]
+detail_labels = ["Über Nyquist (20 Hz)", "NFL-Standard (10 Hz)", "Unter Nyquist (4 Hz)"]
+
+fig, axes = plt.subplots(3, 1, figsize=(16, 9), sharex=True, sharey=True)
+
+t_detail = (0.5, 1.5)
+mask_detail = (t_gt >= t_detail[0]) & (t_gt <= t_detail[1])
+
+for ax, fs, label in zip(axes, detail_rates, detail_labels):
+    t_s, v_s = sampled_signals[fs]
+    mask_s = (t_s >= t_detail[0]) & (t_s <= t_detail[1])
+
+    ax.plot(
+        t_gt[mask_detail],
+        v_gt[mask_detail],
+        color="lightgray",
+        linewidth=1.5,
+        label="Ground Truth",
+    )
+    ax.plot(
+        t_s[mask_s],
+        v_s[mask_s],
+        "o-",
+        color=regime_colors[fs],
+        markersize=6,
+        linewidth=1.2,
+        label=f"$f_s$ = {fs} Hz",
+    )
+
+    ax.set_ylabel("v (yd/s)")
+    ax.set_title(f"{label} | $f_N$ = {fs/2:.0f} Hz")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Detailvergleich | 4 Schrittzyklen bei drei Sampling Rates", fontsize=13, y=1.01
+)
+plt.tight_layout()
+plt.show()
+```
+
+### Frequenzbereich-Analyse und Aliasing-Nachweis
+*Fokus: Spektrale Darstellung und explizite Aliasing-Verifikation*
+
+Im Frequenzbereich wird sichtbar, welche Frequenzkomponenten bei niedrigen Sampling Rates erhalten bleiben und wo Aliasing-Artefakte auftreten.
+
+**Alias-Faltungsformel:** Wenn eine Signalfrequenz $f_{signal}$ mit einer Sampling Rate $f_s$ abgetastet wird, erscheint sie im diskreten Spektrum bei der Alias-Frequenz:
+
+$$f_{alias} = f_{signal} \bmod f_s, \quad \text{gefaltet in } [0,\, f_s/2]$$
+
+Falls $f_{alias} > f_s/2$, wird zusätzlich gespiegelt: $f_{alias} = f_s - f_{alias}$. Die Alias-Frequenz ist somit immer innerhalb des darstellbaren Frequenzbereichs $[0, f_N]$.
+
+**Beispiel:** Die 8-Hz-Komponente bei $f_s = 10$ Hz:
+$$f_{alias} = 8 \bmod 10 = 8 > f_N = 5 \implies f_{alias} = 10 - 8 = 2\,\text{Hz}$$
+
+Die 8-Hz-Harmonische erscheint also als Alias bei 2 Hz — ein niederfrequentes Artefakt, das als langsamere Oszillation fehlinterpretiert werden könnte.
+
+```{python}
+def compute_amplitude_spectrum(signal, fs, remove_dc=True):
+    """Berechnet das einseitige Amplitudenspektrum."""
+    if remove_dc:
+        signal = signal - np.mean(signal)
+    N = len(signal)
+    fft_vals = np.fft.rfft(signal)
+    amplitudes = 2.0 / N * np.abs(fft_vals)
+    freqs = np.fft.rfftfreq(N, d=1.0 / fs)
+    return freqs, amplitudes
+
+
+def compute_alias_freq(f_signal, fs):
+    """Berechnet die Alias-Frequenz einer Signalfrequenz bei gegebener Sampling Rate.
+
+    Wendet die Modulo-Faltungsformel an: f_alias = f_signal mod fs,
+    dann in [0, fs/2] spiegeln.
+    """
+    f_alias = f_signal % fs
+    if f_alias > fs / 2:
+        f_alias = fs - f_alias
+    return f_alias
+
+
+# Signalkomponenten für Aliasing-Analyse
+signal_freqs = [F_STEP, F_HARMONIC]
+signal_labels = ["$f_1$ (4 Hz)", "$f_2$ (8 Hz)"]
+alias_markers = ["green", "limegreen"]
+
+fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+axes_flat = axes.flatten()
+
+for i, (ax, fs) in enumerate(zip(axes_flat[:7], sampling_rates)):
+    t_s, v_s = sampled_signals[fs]
+    freqs_s, amps_s = compute_amplitude_spectrum(v_s, fs)
+    f_nyquist = fs / 2
+
+    ax.stem(freqs_s, amps_s, linefmt=regime_colors[fs], markerfmt="o", basefmt="gray")
+    ax.axvline(
+        f_nyquist,
+        color="red",
+        linestyle="--",
+        linewidth=1.0,
+        alpha=0.7,
+        label=f"$f_N$ = {f_nyquist:.0f} Hz",
+    )
+
+    # Alias-Annotationen für unterabgetastete Rates
+    if fs < 16:
+        annotation_y_offset = 0
+        for f_sig, f_label, acolor in zip(signal_freqs, signal_labels, alias_markers):
+            f_alias = compute_alias_freq(f_sig, fs)
+            # Nur annotieren wenn Aliasing vorliegt (Originalfrequenz > f_nyquist)
+            if f_sig > f_nyquist:
+                ax.axvline(
+                    f_alias,
+                    color=acolor,
+                    linestyle=":",
+                    linewidth=1.5,
+                    alpha=0.8,
+                )
+                ax.annotate(
+                    f"{f_sig:.0f} Hz → {f_alias:.0f} Hz",
+                    xy=(f_alias, ax.get_ylim()[1] * 0.7 - annotation_y_offset),
+                    fontsize=8,
+                    fontweight="bold",
+                    color="darkgreen",
+                    ha="center",
+                    bbox=dict(
+                        boxstyle="round,pad=0.2", facecolor="lightyellow", alpha=0.8
+                    ),
+                )
+                annotation_y_offset += ax.get_ylim()[1] * 0.15
+    elif fs >= 16:
+        # Originalfrequenzen markieren (korrekt erfasst)
+        for f_sig, f_label in zip(signal_freqs, signal_labels):
+            if f_sig <= f_nyquist:
+                ax.annotate(
+                    f"{f_sig:.0f} Hz ✓",
+                    xy=(f_sig, ax.get_ylim()[1] * 0.7),
+                    fontsize=8,
+                    color="darkblue",
+                    ha="center",
+                )
+
+    ax.set_ylabel("Amplitude (yd/s)")
+    ax.set_title(f"$f_s$ = {fs} Hz | {get_regime(fs)}")
+    ax.set_xlim(-0.3, max(f_nyquist + 1, 3))
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+axes_flat[7].set_visible(False)
+axes[3, 0].set_xlabel("Frequenz (Hz)")
+axes[3, 1].set_xlabel("Frequenz (Hz)")
+fig.suptitle(
+    "Amplitudenspektren | Alias-Frequenzen annotiert (grün = Alias)",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Aliasing-Verifikationstabelle: Erwartete vs. beobachtete Alias-Frequenzen
+print("Aliasing-Verifikation | Erwartete vs. beobachtete Alias-Frequenzen")
+print("=" * 85)
+print(
+    f"{'fs (Hz)':>8} | {'f_N (Hz)':>8} | {'Komponente':>12} | {'Erwartet (Hz)':>14} | {'Beobachtet (Hz)':>16} | {'Status':>10}"
+)
+print("-" * 85)
+
+for fs in sampling_rates:
+    t_s, v_s = sampled_signals[fs]
+    freqs_s, amps_s = compute_amplitude_spectrum(v_s, fs)
+    f_nyquist = fs / 2
+
+    for f_sig, label in [(F_STEP, "4 Hz (f1)"), (F_HARMONIC, "8 Hz (f2)")]:
+        f_alias_expected = compute_alias_freq(f_sig, fs)
+
+        # Beobachteten Peak finden: Amplitude im Bereich +/-0.5 Hz um erwartete Alias-Frequenz
+        mask_peak = np.abs(freqs_s - f_alias_expected) < 0.5
+        if np.any(mask_peak):
+            peak_idx = np.argmax(amps_s[mask_peak])
+            f_observed = freqs_s[mask_peak][peak_idx]
+            amp_observed = amps_s[mask_peak][peak_idx]
+        else:
+            f_observed = float("nan")
+            amp_observed = 0.0
+
+        aliased = f_sig > f_nyquist
+        match_ok = abs(f_observed - f_alias_expected) < 0.5 and amp_observed > 0.01
+
+        if not aliased:
+            status = "korrekt"
+        elif match_ok:
+            status = "Alias"
+        else:
+            status = "---"
+
+        print(
+            f"{fs:>8} | {f_nyquist:>8.0f} | {label:>12} | {f_alias_expected:>13.1f}  | {f_observed:>15.1f}  | {status:>10}"
+        )
+
+print("=" * 85)
+print("'korrekt' = Originalfrequenz liegt unter f_N, wird korrekt erfasst")
+print("'Alias'   = Originalfrequenz liegt ueber f_N, erscheint als Alias-Frequenz")
+```
+
+### Aliasing-Demonstration durch Sinc-Rekonstruktion
+*Fokus: Überprüfung des Sampling Theorems*
+
+Gemäss dem Nyquist-Shannon Sampling Theorem kann ein bandbegrenztes Signal aus seinen Samples exakt rekonstruiert werden, sofern die Sampling Rate die Nyquist-Rate übersteigt. Zur Verifikation wird jedes abgetastete Signal mittels Sinc-Interpolation auf die Ground-Truth-Zeitachse rekonstruiert. Da die Ground Truth exakt bekannt ist, zeigt die Differenz den reinen Aliasing-Fehler ohne Interpolations-Artefakte.
+
+```{python}
+def sinc_reconstruction(t_samples, s_samples, t_reconstruct, fs):
+    """Rekonstruktion via Sinc-Interpolation (Whittaker-Shannon)."""
+    T = 1.0 / fs
+    reconstructed = np.zeros_like(t_reconstruct)
+    for tn, sn in zip(t_samples, s_samples):
+        reconstructed += sn * np.sinc((t_reconstruct - tn) / T)
+    return reconstructed
+
+
+# Rekonstruktion für einen Zeitausschnitt (Zoom für bessere Sichtbarkeit)
+t_recon_start, t_recon_end = 0.5, 1.5
+mask_recon = (t_gt >= t_recon_start) & (t_gt <= t_recon_end)
+t_recon = t_gt[mask_recon]
+v_recon_gt = v_gt[mask_recon]
+
+fig, axes = plt.subplots(4, 2, figsize=(16, 14))
+axes_flat = axes.flatten()
+
+for ax, fs in zip(axes_flat[:7], sampling_rates):
+    t_s, v_s = sampled_signals[fs]
+    mask_s = (t_s >= t_recon_start - 1) & (t_s <= t_recon_end + 1)
+
+    v_reconstructed = sinc_reconstruction(t_s[mask_s], v_s[mask_s], t_recon, fs)
+    error = v_recon_gt - v_reconstructed
+    rmse = np.sqrt(np.mean(error**2))
+
+    ax.plot(t_recon, v_recon_gt, color="lightgray", linewidth=1.5, label="Ground Truth")
+    ax.plot(
+        t_recon,
+        v_reconstructed,
+        color=regime_colors[fs],
+        linewidth=0.9,
+        label=f"Rekonstruktion ({fs} Hz)",
+    )
+    ax.fill_between(t_recon, v_recon_gt, v_reconstructed, alpha=0.2, color="red")
+
+    ax.set_ylabel("v (yd/s)")
+    ax.set_title(f"$f_s$ = {fs} Hz | {get_regime(fs)} | RMSE = {rmse:.4f} yd/s")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7, loc="upper right")
+
+axes_flat[7].set_visible(False)
+axes[3, 0].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Sinc-Rekonstruktion | Vergleich mit Ground Truth (Zoom: 0.5–1.5 s)",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Zusammenfassung: RMSE und Max-Fehler über alle Sampling Rates
+rmse_values = []
+max_errors = []
+
+for fs in sampling_rates:
+    t_s, v_s = sampled_signals[fs]
+    mask_s = (t_s >= t_recon_start - 1) & (t_s <= t_recon_end + 1)
+    v_recon = sinc_reconstruction(t_s[mask_s], v_s[mask_s], t_recon, fs)
+    error = v_recon_gt - v_recon
+    rmse_values.append(np.sqrt(np.mean(error**2)))
+    max_errors.append(np.max(np.abs(error)))
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+# RMSE
+bars = ax1.bar(
+    [str(fs) for fs in sampling_rates],
+    rmse_values,
+    color=[regime_colors[fs] for fs in sampling_rates],
+    edgecolor="black",
+    linewidth=0.5,
+)
+ax1.axvline(x=4.5, color="red", linestyle="--", alpha=0.5, label="Nyquist-Rate (16 Hz)")
+ax1.set_xlabel("Sampling Rate (Hz)")
+ax1.set_ylabel("RMSE (yd/s)")
+ax1.set_title("Rekonstruktionsfehler (RMSE)")
+ax1.legend()
+ax1.grid(True, alpha=0.3, axis="y")
+for bar, val in zip(bars, rmse_values):
+    ax1.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.005,
+        f"{val:.4f}",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+    )
+
+# Max-Fehler
+bars2 = ax2.bar(
+    [str(fs) for fs in sampling_rates],
+    max_errors,
+    color=[regime_colors[fs] for fs in sampling_rates],
+    edgecolor="black",
+    linewidth=0.5,
+)
+ax2.axvline(x=4.5, color="red", linestyle="--", alpha=0.5, label="Nyquist-Rate (16 Hz)")
+ax2.set_xlabel("Sampling Rate (Hz)")
+ax2.set_ylabel("Max. Fehler (yd/s)")
+ax2.set_title("Maximaler Rekonstruktionsfehler")
+ax2.legend()
+ax2.grid(True, alpha=0.3, axis="y")
+for bar, val in zip(bars2, max_errors):
+    ax2.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.005,
+        f"{val:.4f}",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+    )
+
+fig.suptitle(
+    "Sinc-Rekonstruktion vs. Ground Truth | Fehlerübersicht", fontsize=13, y=1.02
+)
+plt.tight_layout()
+plt.show()
+
+print("Zusammenfassung:")
+for fs, rmse, maxe in zip(sampling_rates, rmse_values, max_errors):
+    print(
+        f"  f_s = {fs:2d} Hz | RMSE = {rmse:.4f} yd/s | Max = {maxe:.4f} yd/s | {get_regime(fs)}"
+    )
+```
+
+## Tag 4 – Evaluation
+
+### Evaluationsrahmen
+*Fokus: quantitative Bewertung der Sampling-Konfigurationen*
+
+Die in Tag 3 implementierten Sampling-Konfigurationen werden mit zwei quantitativen Metriken bewertet. Als **Baseline** dient die Ground Truth bei $f_{GT}$ = 1000 Hz (exakt bekannt, da synthetisch generiert). Die Evaluation umfasst alle sieben Sampling Rates (2, 4, 6, 8, 10, 16, 20 Hz) über die drei Regime (über, an und unter der Nyquist-Rate von 16 Hz).
+
+### Metrik-Definitionen und Begründung
+
+**Metrik 1: RMSE (Root Mean Square Error)**
+
+$$RMSE = \sqrt{\frac{1}{N}\sum_{i=1}^{N}\left(v_{GT}(t_i) - v_{recon}(t_i)\right)^2} \quad [\text{yd/s}]$$
+
+Der RMSE quantifiziert die Gesamtabweichung des rekonstruierten Signals von der Ground Truth im Zeitbereich. Um den Fehler domänenbezogen interpretierbar zu machen, wird er zusätzlich als Anteil der Schrittoszillations-Amplitude normalisiert: $NRMSE = RMSE / A_{step}$ (mit $A_{step}$ = 0.5 yd/s). Ein NRMSE von 100% bedeutet, dass der Rekonstruktionsfehler die gleiche Grössenordnung wie die Schrittoszillation hat und die Schrittdynamik damit nicht mehr zuverlässig ablesbar ist.
+
+**Metrik 2: Spectral Amplitude Fidelity (SAF)**
+
+$$SAF(f) = \frac{A_{sampled}(f)}{A_{GT}(f)} \quad \in [0,\, 1]$$
+
+Die SAF misst, wie gut die Amplitude einer spezifischen Frequenzkomponente im abgetasteten Signal erhalten bleibt. Sie wird separat für die Schrittfrequenz $f_1$ = 4 Hz und ihre Harmonische $f_2$ = 8 Hz berechnet. Ein SAF von 1.0 bedeutet vollständige Erhaltung, 0.0 bedeutet vollständigen Verlust. Liegt die Zielfrequenz oberhalb der Nyquist-Frequenz ($f \geq f_s/2$), ist die Komponente nicht zuverlässig darstellbar und SAF = 0. Diese Metrik beantwortet direkt die Use-Case-Frage: Kann ein Biomechanik-Analyst die Schrittfrequenz und ihre Harmonische aus den abgetasteten Daten noch extrahieren?
+
+```{python}
+# Evaluationsfenster: 0.5–4.5 s (16 Schrittzyklen, exakt 4.0 s für FFT-Bin-Alignment)
+EVAL_START, EVAL_END = 0.5, 4.5
+mask_eval = (t_gt >= EVAL_START) & (t_gt < EVAL_END)
+t_eval = t_gt[mask_eval]
+v_eval_gt = v_gt[mask_eval]
+
+# Ground Truth Referenzamplituden
+freqs_ref, amps_ref = compute_amplitude_spectrum(v_eval_gt, F_GT)
+amp_gt_4hz = amps_ref[np.argmin(np.abs(freqs_ref - F_STEP))]
+amp_gt_8hz = amps_ref[np.argmin(np.abs(freqs_ref - F_HARMONIC))]
+
+results = []
+
+for fs in sampling_rates:
+    t_s, v_s = sampled_signals[fs]
+    f_nyquist = fs / 2
+
+    # Metrik 1: RMSE via Sinc-Rekonstruktion
+    mask_s_ext = (t_s >= EVAL_START - 1) & (t_s <= EVAL_END + 1)
+    v_recon = sinc_reconstruction(t_s[mask_s_ext], v_s[mask_s_ext], t_eval, fs)
+    error = v_eval_gt - v_recon
+    rmse = np.sqrt(np.mean(error**2))
+    nrmse_pct = rmse / A_STEP * 100
+
+    # Metrik 2: SAF (Spectral Amplitude Fidelity)
+    mask_s_eval = (t_s >= EVAL_START) & (t_s < EVAL_END)
+    v_s_eval = v_s[mask_s_eval]
+    freqs_s, amps_s = compute_amplitude_spectrum(v_s_eval, fs)
+
+    # SAF bei 4 Hz (nur darstellbar wenn f < f_N, gemäss Nyquist-Theorem: f_s > 2*f)
+    if F_STEP < f_nyquist:
+        idx_4 = np.argmin(np.abs(freqs_s - F_STEP))
+        saf_4 = min(amps_s[idx_4] / amp_gt_4hz, 1.0)
+    else:
+        saf_4 = 0.0
+
+    # SAF bei 8 Hz
+    if F_HARMONIC < f_nyquist:
+        idx_8 = np.argmin(np.abs(freqs_s - F_HARMONIC))
+        saf_8 = min(amps_s[idx_8] / amp_gt_8hz, 1.0)
+    else:
+        saf_8 = 0.0
+
+    results.append(
+        {
+            "fs (Hz)": fs,
+            "f_N (Hz)": f_nyquist,
+            "Regime": get_regime(fs),
+            "RMSE (yd/s)": rmse,
+            "NRMSE (%)": nrmse_pct,
+            "SAF (4 Hz)": saf_4,
+            "SAF (8 Hz)": saf_8,
+        }
+    )
+
+df_eval = pd.DataFrame(results)
+
+# Strukturierte Vergleichstabelle
+print("Strukturierte Vergleichstabelle | Sampling Rate Evaluation")
+print("=" * 90)
+print(
+    f"{'fs':>4} | {'f_N':>4} | {'Regime':>14} | {'RMSE':>10} | {'NRMSE':>8} | {'SAF(4Hz)':>9} | {'SAF(8Hz)':>9}"
+)
+print(
+    f"{'(Hz)':>4} | {'(Hz)':>4} | {'':>14} | {'(yd/s)':>10} | {'(%)':>8} | {'':>9} | {'':>9}"
+)
+print("-" * 90)
+for _, row in df_eval.iterrows():
+    print(
+        f"{row['fs (Hz)']:>4.0f} | {row['f_N (Hz)']:>4.0f} | {row['Regime']:>14} | "
+        f"{row['RMSE (yd/s)']:>10.4f} | {row['NRMSE (%)']:>7.1f}% | "
+        f"{row['SAF (4 Hz)']:>9.3f} | {row['SAF (8 Hz)']:>9.3f}"
+    )
+print("=" * 90)
+print(f"\nBaseline: Ground Truth bei {F_GT} Hz (RMSE = 0, NRMSE = 0%, SAF = 1.000)")
+print(
+    f"Referenzamplituden: A(4 Hz) = {amp_gt_4hz:.4f} yd/s, A(8 Hz) = {amp_gt_8hz:.4f} yd/s"
+)
+print(f"Normalisierung: NRMSE = RMSE / A_step ({A_STEP} yd/s)")
+```
+
+```{python}
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5))
+
+# --- Plot 1: NRMSE vs. Sampling Rate ---
+bars = ax1.bar(
+    [str(int(fs)) for fs in df_eval["fs (Hz)"]],
+    df_eval["NRMSE (%)"],
+    color=[regime_colors[int(fs)] for fs in df_eval["fs (Hz)"]],
+    edgecolor="black",
+    linewidth=0.5,
+)
+ax1.axvline(x=4.5, color="red", linestyle="--", alpha=0.6, label="Nyquist-Rate (16 Hz)")
+ax1.axhline(
+    y=10, color="gray", linestyle=":", alpha=0.7, label="Schwelle: 10% von $A_{step}$"
+)
+ax1.set_xlabel("Sampling Rate (Hz)")
+ax1.set_ylabel("NRMSE (% von $A_{step}$)")
+ax1.set_title("Metrik 1 | Normalisierter Rekonstruktionsfehler")
+ax1.legend(fontsize=9)
+ax1.grid(True, alpha=0.3, axis="y")
+
+for bar, val in zip(bars, df_eval["NRMSE (%)"]):
+    ax1.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height() + 0.5,
+        f"{val:.1f}%",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+    )
+
+# --- Plot 2: SAF vs. Sampling Rate ---
+x_pos = range(len(sampling_rates))
+x_labels = [str(fs) for fs in sampling_rates]
+
+ax2.plot(
+    x_pos,
+    df_eval["SAF (4 Hz)"],
+    "s-",
+    color="steelblue",
+    markersize=8,
+    linewidth=1.5,
+    label="SAF ($f_1$ = 4 Hz)",
+)
+ax2.plot(
+    x_pos,
+    df_eval["SAF (8 Hz)"],
+    "D-",
+    color="darkorange",
+    markersize=8,
+    linewidth=1.5,
+    label="SAF ($f_2$ = 8 Hz)",
+)
+ax2.axvline(x=5, color="red", linestyle="--", alpha=0.6, label="Nyquist-Rate (16 Hz)")
+ax2.axhline(y=0.5, color="gray", linestyle=":", alpha=0.7, label="50%-Schwelle")
+ax2.set_xticks(x_pos)
+ax2.set_xticklabels(x_labels)
+ax2.set_xlabel("Sampling Rate (Hz)")
+ax2.set_ylabel("Spectral Amplitude Fidelity")
+ax2.set_title("Metrik 2 | Frequenzkomponenten-Erhaltung")
+ax2.set_ylim(-0.05, 1.15)
+ax2.legend(fontsize=9)
+ax2.grid(True, alpha=0.3)
+
+for i, (s4, s8) in enumerate(zip(df_eval["SAF (4 Hz)"], df_eval["SAF (8 Hz)"])):
+    if s4 > 0:
+        ax2.annotate(
+            f"{s4:.2f}",
+            (i, s4),
+            textcoords="offset points",
+            xytext=(0, 10),
+            ha="center",
+            fontsize=8,
+            color="steelblue",
+        )
+    if s8 > 0:
+        ax2.annotate(
+            f"{s8:.2f}",
+            (i, s8),
+            textcoords="offset points",
+            xytext=(0, -15),
+            ha="center",
+            fontsize=8,
+            color="darkorange",
+        )
+
+fig.suptitle("Evaluation | Sampling Rate vs. Signalqualität", fontsize=13, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Kritische Schwellen und Informationsverlust
+print("Kritische Schwellen und Informationsverlust")
+print("=" * 70)
+
+# Schwelle 1: NRMSE > 10% (Schrittdynamik nicht zuverlässig ablesbar)
+threshold_nrmse = 10.0
+above_threshold = df_eval[df_eval["NRMSE (%)"] > threshold_nrmse]
+below_threshold = df_eval[df_eval["NRMSE (%)"] <= threshold_nrmse]
+
+print(
+    f"\n1. NRMSE > {threshold_nrmse}% (Rekonstruktionsfehler > 10% der Schrittamplitude):"
+)
+if len(above_threshold) > 0:
+    rates_above = above_threshold["fs (Hz)"].astype(int).tolist()
+    print(f"   Betroffen: fs = {', '.join(str(r) for r in rates_above)} Hz")
+if len(below_threshold) > 0:
+    print(
+        f"   Unter Schwelle: fs = {', '.join(str(int(r)) for r in below_threshold['fs (Hz)'])} Hz"
+    )
+
+# Schwelle 2: SAF(8 Hz) - 2. Harmonische
+print(f"\n2. Erhaltung der 2. Harmonischen (f2 = 8 Hz):")
+lost_8 = df_eval[df_eval["SAF (8 Hz)"] == 0]["fs (Hz)"].astype(int).tolist()
+kept_8 = df_eval[df_eval["SAF (8 Hz)"] > 0]
+print(f"   Verloren (SAF = 0): fs = {', '.join(str(r) for r in lost_8)} Hz")
+if len(kept_8) > 0:
+    print(
+        f"   Erhalten ab: fs = {int(kept_8['fs (Hz)'].min())} Hz (SAF = {kept_8['SAF (8 Hz)'].iloc[0]:.3f})"
+    )
+
+# Schwelle 3: SAF(4 Hz) - Schrittfrequenz
+print(f"\n3. Erhaltung der Schrittfrequenz (f1 = 4 Hz):")
+lost_4 = df_eval[df_eval["SAF (4 Hz)"] == 0]["fs (Hz)"].astype(int).tolist()
+kept_4 = df_eval[df_eval["SAF (4 Hz)"] > 0]
+print(f"   Verloren (SAF = 0): fs = {', '.join(str(r) for r in lost_4)} Hz")
+if len(kept_4) > 0:
+    print(
+        f"   Erhalten ab: fs = {int(kept_4['fs (Hz)'].min())} Hz (SAF = {kept_4['SAF (4 Hz)'].iloc[0]:.3f})"
+    )
+
+# NFL-Standard: detaillierte Analyse
+nfl = df_eval[df_eval["fs (Hz)"] == 10].iloc[0]
+print(f"\n{'='*70}")
+print(f"Informationsverlust bei NFL-Standard (fs = 10 Hz, f_N = 5 Hz):")
+print(f"  RMSE      = {nfl['RMSE (yd/s)']:.4f} yd/s")
+print(f"  NRMSE     = {nfl['NRMSE (%)']:.1f}% von A_step")
+print(
+    f"  SAF(4 Hz) = {nfl['SAF (4 Hz)']:.3f} ({nfl['SAF (4 Hz)']*100:.1f}% der Amplitude erhalten)"
+)
+print(
+    f"  SAF(8 Hz) = {nfl['SAF (8 Hz)']:.3f} ({(1 - nfl['SAF (8 Hz)'])*100:.0f}% der Amplitude verloren)"
+)
+
+# Über-Nyquist Referenz
+print(f"\nReferenz (über Nyquist-Rate):")
+for _, row in df_eval[df_eval["fs (Hz)"] >= 20].iterrows():
+    print(
+        f"  fs = {int(row['fs (Hz)'])} Hz | NRMSE = {row['NRMSE (%)']:.2f}% | "
+        f"SAF(4Hz) = {row['SAF (4 Hz)']:.3f} | SAF(8Hz) = {row['SAF (8 Hz)']:.3f}"
+    )
+```
+
+### Beobachtungen
+
+- Über der Nyquist-Rate ($f_s$ = 20 Hz): NRMSE nahe 0%, beide Frequenzkomponenten vollständig erhalten (SAF $\approx$ 1.0).
+- An der Nyquist-Rate ($f_s$ = 16 Hz): Die 8-Hz-Komponente liegt exakt an der Nyquist-Frequenz und wird nicht zuverlässig erfasst (SAF = 0). Der RMSE steigt gegenüber $f_s$ = 20 Hz.
+- NFL-Standard ($f_s$ = 10 Hz): Die 4-Hz-Schrittfrequenz bleibt erhalten (SAF $\approx$ 1.0), die 8-Hz-Harmonische geht vollständig verloren (SAF = 0).
+- Unter der Nyquist-Rate ($f_s$ $\leq$ 8 Hz): Beide Komponenten gehen progressiv verloren. Der NRMSE steigt mit sinkender Sampling Rate.
+- Die kritische Schwelle für die Schrittfrequenz-Erhaltung liegt zwischen $f_s$ = 8 Hz und $f_s$ = 10 Hz.
+
+## Tag 5 – Analyse & Kommunikation
+
+### Analyse und Diskussion
+
+*Fokus: Beobachtungen, Interpretation und Diskussion im Kontext des Anwendungsfalls (~200 Worter)*
+
+**Beobachtungen:** Die Evaluation zeigt einen scharfen Übergang der Signaltreue an der Nyquist-Rate. Bei $f_s$ = 20 Hz werden beide Frequenzkomponenten vollständig erhalten (SAF $\approx$ 1.0, NRMSE = 10.8%). Beim NFL-Standard ($f_s$ = 10 Hz) bleibt die Schrittfrequenz mit SAF = 0.993 nahezu perfekt erhalten, die 2. Harmonische geht jedoch vollständig verloren (SAF = 0). Der NRMSE von 33.2% bedeutet, dass der Rekonstruktionsfehler ein Drittel der Schrittamplitude beträgt. Unter $f_s \leq$ 8 Hz sind beide Komponenten nicht mehr darstellbar und der NRMSE übersteigt 57%.
+
+**Interpretation:** Bezogen auf die Problemstellung ist das NFL-Tracking (10 Hz) für biomechanische Schrittanalysen nur teilweise geeignet. Ein Analyst kann die grundlegende Schrittfrequenz (4 Hz) zuverlässig messen, erhält aber keine Informationen über die Schrittform. Die 8-Hz-Harmonische, die das asymmetrische Aufprallprofil beschreibt, erscheint durch Aliasing als 2-Hz-Artefakt und könnte als langsamere Oszillation fehlinterpretiert werden. Für eine vollständige Stride-Analyse inklusive Schrittform wäre eine Sampling Rate von mindestens 20 Hz erforderlich.
+
+**Diskussion:** Das Nyquist-Shannon Theorem wird durch die Ergebnisse unter Idealbedingungen bestätigt. Die Übertragbarkeit auf reale NFL-Daten ist jedoch eingeschränkt: Reale Schrittdynamiken sind nicht rein sinusförmig und enthalten breitbandige Impulsanteile (Fussaufprall), die über 8 Hz hinausgehen. Die tatsächlich benötigte Sampling Rate wäre daher höher als die theoretischen 16 Hz. Zudem variiert die Schrittfrequenz mit der Laufgeschwindigkeit, was im stationären Modell nicht abgebildet wird. Die 10-Hz-Rate der NFL stellt einen pragmatischen Kompromiss zwischen Datenvolumen (22 Spieler, Echtzeit) und Auflösung dar, der für Positionstracking ausreicht, für biomechanische Schrittanalysen jedoch unzureichend ist.
+
+---
+
+# Aufgabe: Korrelation
+
+## Tag 6 – Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+Im Bereich der NFL-Leistungsanalyse laufen Wide Receiver (WR) pro Spiel zahlreiche Pass-Routen, deren Geschwindigkeitsprofile charakteristische wiederkehrende Muster aufweisen. Alle Routen beginnen mit einer Beschleunigungsphase von der Line of Scrimmage und erreichen je nach Routentyp unterschiedliche Spitzengeschwindigkeiten und Dauern. Kurze Routen wie SLANT oder HITCH erreichen typischerweise 5-7 yards/s über 1.5-2.5 Sekunden, während lange Routen wie GO oder CORNER höhere Geschwindigkeiten (7-8 yards/s) über längere Dauern erreichen. Die zentrale analytische Frage lautet: Kann ein spezifisches Geschwindigkeitsmuster (z.B. die Signatur einer HITCH-Route) automatisch in einem längeren Spielsignal lokalisiert werden, und wie konsistent wiederholen sich Routenmuster desselben Typs? Diese Frage ist relevant für die USA, da die NFL mit Next Gen Stats das umfangreichste Spieler-Tracking-Programm im Profisport betreibt und Antworten darauf direkten Einfluss auf taktische Entscheidungen im Scouting und in der Spielvorbereitung haben.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der Erkennung wiederkehrender Geschwindigkeitsmuster und der Detektion spezifischer Routensegmente im Geschwindigkeitssignal eines NFL Wide Receivers mittels Korrelationsanalyse. Wenn wiederkehrende Strukturen nicht zuverlässig identifiziert werden, fehlen Analysten wichtige Informationen über die Konsistenz der Routenausführung und die taktische Vorhersagbarkeit eines Spielers. Die zentrale Herausforderung besteht darin, periodische Strukturen (Schrittfrequenz während des Sprints) und spezifische Segmente (z.B. das Break-Muster einer HITCH-Route) robust zu identifizieren, obwohl natürliche Variabilität in Laufgeschwindigkeit, Timing und Spielsituation die Signalform beeinflussen.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Das Ziel ist zu untersuchen, wie effektiv Auto-Korrelation periodische Strukturen (Schrittzyklen und Routenwiederholungen) im Geschwindigkeitssignal eines Wide Receivers aufdecken kann und wie zuverlässig Cross-Korrelation ein spezifisches Routensegment (Break-Muster) innerhalb eines längeren Signals detektiert.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Die Signalparameter basieren auf den realen Geschwindigkeitsprofilen von Puka Nacua (WR, LA Rams, Saison 2023), erfasst durch RFID-Tracking-Chips (Zebra Technologies) mit 10 Hz im Rahmen des NFL Big Data Bowl 2026 (Kaggle/NFL Next Gen Stats). Die realen Daten zeigen Spitzengeschwindigkeiten von 4-9 yards/s und Routendauern von 1.4-4.0 Sekunden. Die Signale sind nicht-stationär: jede Route hat eine transiente Beschleunigungsphase gefolgt von einer quasi-stationären Sprint-Phase. Innerhalb einer Route ist die Geschwindigkeit weitgehend glatt mit geringer hochfrequenter Variabilität, da die 10 Hz Sampling Rate Schrittoszillationen nicht vollständig auflöst (vgl. Task 1).
+
+Für die Korrelationsanalyse wird ein synthetisches Routenmodell bei 100 Hz konstruiert, dessen Parameter quantitativ aus den realen Nacua-Daten abgeleitet werden. Dieses Modell enthält eine periodische Schrittkomponente ($f_{stride}$ = 3.0 Hz) und mehrere Routenwiederholungen mit eingebetteten Break-Mustern (HITCH-Routensignaturen). Die höhere Sampling Rate ermöglicht die vollständige Erfassung der Schrittdynamik, die bei 10 Hz NFL-Tracking durch Aliasing verfälscht wird (vgl. Task 1, Tag 1-5).
+
+```{python}
+# --- Reale Daten: Parameterherleitung ---
+nacua = pd.read_csv("../data/clean/nacua_speed.csv")
+supp = pd.read_csv("../data/clean/supplementary.csv")
+
+GAME_ID = 2023091012  # Week 1: SEA @ LAR, 10.09.2023
+game = nacua[nacua["game_id"] == GAME_ID]
+nacua_targets = supp[
+    (supp["game_id"] == GAME_ID)
+    & supp["play_description"].str.contains("Nacua", na=False)
+]
+route_map = nacua_targets.set_index("play_id")["route_of_targeted_receiver"].to_dict()
+
+# Quantitative Parameterherleitung aus realen Daten
+stats = []
+for pid, route in route_map.items():
+    play = game[game["play_id"] == pid]
+    stats.append(
+        {
+            "route": route,
+            "v_max": play["speed_yards_per_s"].max(),
+            "duration": play["time_s"].max(),
+            "n_frames": len(play),
+        }
+    )
+stats_df = pd.DataFrame(stats)
+
+print("Parameterherleitung aus realen Nacua-Daten (Week 1, 12 Target-Plays)")
+print("=" * 65)
+for route in ["HITCH", "SLANT", "IN", "GO", "CORNER"]:
+    sub = stats_df[stats_df["route"] == route]
+    std_v = f"+/- {sub['v_max'].std():.1f}" if len(sub) > 1 else "      "
+    std_d = f"+/- {sub['duration'].std():.1f}" if len(sub) > 1 else "      "
+    print(
+        f"{route:8s}  n={len(sub)}  v_max={sub['v_max'].mean():.1f} {std_v} yd/s"
+        f"  Dauer={sub['duration'].mean():.1f} {std_d} s"
+    )
+
+v_peak_all = stats_df["v_max"].mean()
+dur_all = stats_df["duration"].mean()
+print(
+    f"\nGesamt:   v_max={v_peak_all:.1f} +/- {stats_df['v_max'].std():.1f} yd/s"
+    f"  Dauer={dur_all:.1f} +/- {stats_df['duration'].std():.1f} s"
+)
+print(
+    f"\n-> Modellparameter: V_PEAK = 6.5 yd/s (aufgerundet von {v_peak_all:.1f}, Sprint-Phase > Mittel)"
+)
+print(f"-> Routendauer im Modell: 3.0 s (aufgerundet von {dur_all:.1f} s)")
+
+# Reale Daten: Geschwindigkeitsprofile nach Routentyp
+colors = {
+    "HITCH": "#1f77b4",
+    "SLANT": "#ff7f0e",
+    "IN": "#2ca02c",
+    "GO": "#d62728",
+    "CORNER": "#9467bd",
+}
+fig, ax = plt.subplots(figsize=(12, 4))
+plotted = set()
+for pid in sorted(game["play_id"].unique()):
+    play = game[game["play_id"] == pid]
+    route = route_map.get(pid)
+    if route and route in colors:
+        c, a, lw = colors[route], 0.85, 1.4
+        label = route if route not in plotted else None
+        plotted.add(route)
+    else:
+        c, a, lw = "lightgray", 0.3, 0.6
+        label = "Nicht Target" if "Nicht Target" not in plotted else None
+        if label:
+            plotted.add("Nicht Target")
+    ax.plot(
+        play["time_s"],
+        play["speed_yards_per_s"],
+        color=c,
+        alpha=a,
+        linewidth=lw,
+        label=label,
+    )
+
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Geschwindigkeit (yards/s)")
+ax.set_title("Reale Daten: Puka Nacua, Week 1 (SEA @ LAR, 12 Targets in 26 Plays)")
+ax.legend(title="Route (Target)", fontsize=8, ncol=3, loc="upper right")
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# --- Synthetisches Routenmodell ---
+FS_REF = 100  # Referenz-Sampling-Rate (Hz)
+T_TOTAL = 15.0  # Gesamtdauer (s)
+V_PEAK = 6.5  # Sprintgeschwindigkeit (yards/s), aufgerundet aus Nacua-Daten
+F_STRIDE = 3.0  # Schrittfrequenz (Hz)
+A_STRIDE = 0.4  # Amplitude Grundschwingung (yards/s)
+A_HARM = 0.12  # Amplitude 1. Harmonische (yards/s)
+BREAK_DEPTH = 3.5  # Tiefe des Break-Musters (yards/s)
+BREAK_WIDTH = 0.08  # Breite des Break-Musters (s)
+
+t = np.arange(0, T_TOTAL, 1 / FS_REF)
+
+# Routenblöcke: (Startzeit, Dauer) - Dauer 3.0 s, aufgerundet aus Mittelwert
+route_blocks = [(0.5, 3.0), (5.0, 3.0), (9.5, 3.0)]
+
+# Geschwindigkeits-Envelope (Beschleunigung/Verzögerung pro Route)
+envelope = np.zeros_like(t)
+for t_start, duration in route_blocks:
+    mask = (t >= t_start) & (t < t_start + duration)
+    t_rel = t[mask] - t_start
+    env = np.ones_like(t_rel)
+    env *= np.minimum(t_rel / 0.5, 1.0)  # Anlauf (0.5 s)
+    env *= np.minimum((duration - t_rel) / 0.3, 1.0)  # Auslauf (0.3 s)
+    envelope[mask] = env
+
+# Periodische Schrittoszillation
+stride = A_STRIDE * np.sin(2 * np.pi * F_STRIDE * t) + A_HARM * np.sin(
+    2 * np.pi * 2 * F_STRIDE * t
+)
+
+# Referenzsignal: Envelope * (Basisgeschwindigkeit + Schrittoszillation)
+v_ref = envelope * (V_PEAK + stride)
+
+# Break-Muster (HITCH-Signatur) bei Route 1 und 3
+t_breaks = [2.5, 11.5]
+for tb in t_breaks:
+    v_ref -= BREAK_DEPTH * np.exp(-(((t - tb) / BREAK_WIDTH) ** 2)) * envelope
+
+# Rauschen (realistisch, nur bei Bewegung)
+np.random.seed(42)
+v_ref += 0.08 * np.random.randn(len(t)) * (envelope > 0.1)
+v_ref = np.maximum(v_ref, 0)
+
+# === Visualisierung ===
+fig, ax = plt.subplots(figsize=(12, 4))
+
+ax.plot(t, v_ref, linewidth=0.7, color="C0")
+for i, (ts, dur) in enumerate(route_blocks):
+    ax.axvspan(ts, ts + dur, alpha=0.06, color="C0")
+    ax.text(ts + dur / 2, 7.8, f"Route {i + 1}", ha="center", fontsize=9, color="C0")
+for tb in t_breaks:
+    ax.annotate(
+        "Break",
+        xy=(tb, v_ref[np.argmin(np.abs(t - tb))]),
+        xytext=(tb + 0.5, 1.0),
+        fontsize=8,
+        color="red",
+        arrowprops=dict(arrowstyle="->", color="red", lw=1),
+    )
+
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Geschwindigkeit (yards/s)")
+ax.set_title(
+    f"Synthetisches Routenmodell ($f_{{stride}}$ = {F_STRIDE} Hz, $f_s$ = {FS_REF} Hz)"
+)
+ax.set_ylim(-0.5, 8.5)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Die realen Nacua-Daten zeigen, dass alle Routentypen eine gemeinsame Beschleunigungsphase in den ersten 0.5-1.0 Sekunden aufweisen. Gleiche Routentypen erzeugen ähnliche Geschwindigkeitsverläufe: HITCH (blau) und SLANT (orange) erreichen moderate Spitzengeschwindigkeiten (5-7 yards/s), während GO (rot) und CORNER (lila) höhere Werte (7-8 yards/s) über längere Dauern zeigen. Die quantitative Parameterherleitung ergibt einen mittleren v_max von ~6.0 yards/s und eine mittlere Routendauer von ~2.2 s über alle 12 Target-Plays. Das synthetische Modell verwendet V_PEAK = 6.5 yards/s, da dieser Wert die Sprint-Phase (ohne die langsamere Anlaufphase) besser repräsentiert, und eine Routendauer von 3.0 s. Das synthetische Routenmodell enthält drei Routenblöcke mit periodischer Schritt-Oszillation bei 3.0 Hz und zwei eingebettete Break-Muster bei t = 2.5 s und t = 11.5 s (Route 1 und 3), die als Grundlage für Auto- und Cross-Korrelation dienen.
+
+### Signalcharakteristik und Begründung für Korrelationsanalyse
+
+Das synthetische Geschwindigkeitssignal enthält zwei Ebenen wiederkehrender Strukturen:
+
+1. **Schrittfrequenz ($f_{stride}$ = 3.0 Hz):** Während des Sprints erzeugt jeder Schritt eine periodische Geschwindigkeitsoszillation. Diese Mikro-Periodizität ist über alle Routenblöcke konsistent und eignet sich für die Detektion via Auto-Korrelation.
+
+2. **Routenstruktur (quasi-periodisch, ~4.5 s Abstand):** Die Abfolge von Sprint-Phasen und Pausen erzeugt eine Makro-Periodizität auf der Ebene ganzer Routen. Auto-Korrelation kann die Regelmässigkeit dieser Wiederholungen quantifizieren.
+
+3. **Identifizierbare Segmente (Break-Muster):** Das HITCH-typische Break-Muster (scharfe Geschwindigkeitsreduktion) erscheint an zwei definierten Positionen im Signal (t = 2.5 s und t = 11.5 s) und dient als Template für die Cross-Korrelation.
+
+**Begründung für Korrelation gegenüber alternativen Methoden:**
+- **FFT/Spektralanalyse** eignet sich zur Identifikation globaler Frequenzkomponenten, kann aber keine zeitliche Lokalisierung von Segmenten leisten und setzt Stationarität voraus, die bei Routensignalen nicht gegeben ist.
+- **Dynamic Time Warping (DTW)** erlaubt nicht-lineare Zeitalignment, ist aber rechenintensiv und für die Detektion einfacher periodischer Muster überdimensioniert.
+- **Korrelationsanalyse** bietet den Vorteil, sowohl globale Periodizität (Auto-Korrelation) als auch zeitliche Segmentlokalisierung (Cross-Korrelation) in einem einheitlichen methodischen Rahmen zu adressieren, ohne Annahmen über Stationarität oder Signalform zu erfordern.
+
+**Einschränkungen der Datenbasis:**
+- Die realen Daten umfassen nur 12 Nacua-Target-Plays pro Spiel mit variablen Dauern (1.4-4.0 s), was die Anzahl verfügbarer Routenwiederholungen für die Korrelationsanalyse begrenzt.
+- Die 10 Hz Sampling Rate der NFL-Daten kann Schrittoszillationen nicht vollständig auflösen. Das synthetische Modell bei 100 Hz umgeht diese Limitation und erlaubt die Untersuchung der Korrelationseigenschaften unter idealen Bedingungen.
+- Die Geschwindigkeitsprofile sind nicht-stationär (transiente Beschleunigungsphase), was die Interpretation der Auto-Korrelation bei kurzen Lag-Bereichen beeinflussen kann.
+
+# Quellenverzeichnis
+
+[1] Kaggle, "NFL Big Data Bowl 2026 - Analytics," 2026. [Online]. Verfügbar: https://www.kaggle.com/competitions/nfl-big-data-bowl-2026-analytics/overview. [Zugriff am: 9. März 2026].
+
+[2] C. Hanon und B. Gajer, "Velocity and Stride Parameters of World-Class 400-Meter Athletes Compared With Less Experienced Runners," *Journal of Strength and Conditioning Research*, INSEP, 2004. [Online]. Verfügbar: https://insep.hal.science/hal-01623755v1/document
+
