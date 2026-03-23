@@ -1,0 +1,1263 @@
+---
+title: GBSV MC1 – Korrelation
+author: Luca Manna
+date: '2026-03-09'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Korrelation
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+```
+
+## Tag 6 – Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+Im Bereich der NFL-Leistungsanalyse laufen Wide Receiver (WR) pro Spiel zahlreiche Pass-Routen, deren Geschwindigkeitsprofile charakteristische wiederkehrende Muster aufweisen. Alle Routen beginnen mit einer Beschleunigungsphase von der Line of Scrimmage und erreichen je nach Routentyp unterschiedliche Spitzengeschwindigkeiten und Dauern. Kurze Routen wie SLANT oder HITCH erreichen typischerweise 5-7 yards/s über 1.5-2.5 Sekunden, während lange Routen wie GO oder CORNER höhere Geschwindigkeiten (7-8 yards/s) über längere Dauern erreichen. Die zentrale analytische Frage lautet: Kann ein spezifisches Geschwindigkeitsmuster (z.B. die Signatur einer HITCH-Route) automatisch in einem längeren Spielsignal lokalisiert werden, und wie konsistent wiederholen sich Routenmuster desselben Typs? Diese Frage ist relevant für die USA, da die NFL mit Next Gen Stats das umfangreichste Spieler-Tracking-Programm im Profisport betreibt und Antworten darauf direkten Einfluss auf taktische Entscheidungen im Scouting und in der Spielvorbereitung haben.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der Erkennung wiederkehrender Geschwindigkeitsmuster und der Detektion spezifischer Routensegmente im Geschwindigkeitssignal eines NFL Wide Receivers mittels Korrelationsanalyse. Wenn wiederkehrende Strukturen nicht zuverlässig identifiziert werden, fehlen Analysten wichtige Informationen über die Konsistenz der Routenausführung und die taktische Vorhersagbarkeit eines Spielers. Die zentrale Herausforderung besteht darin, periodische Strukturen (Schrittfrequenz während des Sprints) und spezifische Segmente (z.B. das Break-Muster einer HITCH-Route) robust zu identifizieren, obwohl natürliche Variabilität in Laufgeschwindigkeit, Timing und Spielsituation die Signalform beeinflussen.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Das Ziel ist zu untersuchen, wie effektiv Auto-Korrelation periodische Strukturen (Schrittzyklen und Routenwiederholungen) im Geschwindigkeitssignal eines Wide Receivers aufdecken kann und wie zuverlässig Cross-Korrelation ein spezifisches Routensegment (Break-Muster) innerhalb eines längeren Signals detektiert.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Die Signalparameter basieren auf den realen Geschwindigkeitsprofilen von Puka Nacua (WR, LA Rams, Saison 2023), erfasst durch RFID-Tracking-Chips (Zebra Technologies) mit 10 Hz im Rahmen des NFL Big Data Bowl 2026 (Kaggle/NFL Next Gen Stats). Die realen Daten zeigen Spitzengeschwindigkeiten von 4-9 yards/s und Routendauern von 1.4-4.0 Sekunden. Die Signale sind nicht-stationär: jede Route hat eine transiente Beschleunigungsphase gefolgt von einer quasi-stationären Sprint-Phase. Innerhalb einer Route ist die Geschwindigkeit weitgehend glatt mit geringer hochfrequenter Variabilität, da die 10 Hz Sampling Rate Schrittoszillationen nicht vollständig auflöst (vgl. Task 1).
+
+Für die Korrelationsanalyse wird ein synthetisches Routenmodell bei 100 Hz konstruiert, dessen Parameter quantitativ aus den realen Nacua-Daten abgeleitet werden. Dieses Modell enthält eine periodische Schrittkomponente ($f_{stride}$ = 3.0 Hz) und mehrere Routenwiederholungen mit eingebetteten Break-Mustern (HITCH-Routensignaturen). Die höhere Sampling Rate ermöglicht die vollständige Erfassung der Schrittdynamik, die bei 10 Hz NFL-Tracking durch Aliasing verfälscht wird (vgl. Task 1, Tag 1-5).
+
+```{python}
+# --- Reale Daten: Parameterherleitung ---
+nacua = pd.read_csv("../data/clean/nacua_speed.csv")
+supp = pd.read_csv("../data/clean/supplementary.csv")
+
+GAME_ID = 2023091012  # Week 1: SEA @ LAR, 10.09.2023
+game = nacua[nacua["game_id"] == GAME_ID]
+nacua_targets = supp[
+    (supp["game_id"] == GAME_ID)
+    & supp["play_description"].str.contains("Nacua", na=False)
+]
+route_map = nacua_targets.set_index("play_id")["route_of_targeted_receiver"].to_dict()
+
+# Quantitative Parameterherleitung aus realen Daten
+stats = []
+for pid, route in route_map.items():
+    play = game[game["play_id"] == pid]
+    stats.append(
+        {
+            "route": route,
+            "v_max": play["speed_yards_per_s"].max(),
+            "duration": play["time_s"].max(),
+            "n_frames": len(play),
+        }
+    )
+stats_df = pd.DataFrame(stats)
+
+print("Parameterherleitung aus realen Nacua-Daten (Week 1, 12 Target-Plays)")
+print("=" * 65)
+for route in ["HITCH", "SLANT", "IN", "GO", "CORNER"]:
+    sub = stats_df[stats_df["route"] == route]
+    std_v = f"+/- {sub['v_max'].std():.1f}" if len(sub) > 1 else "      "
+    std_d = f"+/- {sub['duration'].std():.1f}" if len(sub) > 1 else "      "
+    print(
+        f"{route:8s}  n={len(sub)}  v_max={sub['v_max'].mean():.1f} {std_v} yd/s"
+        f"  Dauer={sub['duration'].mean():.1f} {std_d} s"
+    )
+
+v_peak_all = stats_df["v_max"].mean()
+dur_all = stats_df["duration"].mean()
+print(
+    f"\nGesamt:   v_max={v_peak_all:.1f} +/- {stats_df['v_max'].std():.1f} yd/s"
+    f"  Dauer={dur_all:.1f} +/- {stats_df['duration'].std():.1f} s"
+)
+print(
+    f"\n-> Modellparameter: V_PEAK = 6.5 yd/s (aufgerundet von {v_peak_all:.1f}, Sprint-Phase > Mittel)"
+)
+print(f"-> Routendauer im Modell: 3.0 s (aufgerundet von {dur_all:.1f} s)")
+
+# Reale Daten: Geschwindigkeitsprofile nach Routentyp
+colors = {
+    "HITCH": "#1f77b4",
+    "SLANT": "#ff7f0e",
+    "IN": "#2ca02c",
+    "GO": "#d62728",
+    "CORNER": "#9467bd",
+}
+fig, ax = plt.subplots(figsize=(12, 4))
+plotted = set()
+for pid in sorted(game["play_id"].unique()):
+    play = game[game["play_id"] == pid]
+    route = route_map.get(pid)
+    if route and route in colors:
+        c, a, lw = colors[route], 0.85, 1.4
+        label = route if route not in plotted else None
+        plotted.add(route)
+    else:
+        c, a, lw = "lightgray", 0.3, 0.6
+        label = "Nicht Target" if "Nicht Target" not in plotted else None
+        if label:
+            plotted.add("Nicht Target")
+    ax.plot(
+        play["time_s"],
+        play["speed_yards_per_s"],
+        color=c,
+        alpha=a,
+        linewidth=lw,
+        label=label,
+    )
+
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Geschwindigkeit (yards/s)")
+ax.set_title("Reale Daten: Puka Nacua, Week 1 (SEA @ LAR, 12 Targets in 26 Plays)")
+ax.legend(title="Route (Target)", fontsize=8, ncol=3, loc="upper right")
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# --- Synthetisches Routenmodell ---
+FS_REF = 100  # Referenz-Sampling-Rate (Hz)
+T_TOTAL = 15.0  # Gesamtdauer (s)
+V_PEAK = 6.5  # Sprintgeschwindigkeit (yards/s), aufgerundet aus Nacua-Daten
+F_STRIDE = 3.0  # Schrittfrequenz (Hz)
+A_STRIDE = 0.4  # Amplitude Grundschwingung (yards/s)
+A_HARM = 0.12  # Amplitude 1. Harmonische (yards/s)
+BREAK_DEPTH = 3.5  # Tiefe des Break-Musters (yards/s)
+BREAK_WIDTH = 0.08  # Breite des Break-Musters (s)
+
+t = np.arange(0, T_TOTAL, 1 / FS_REF)
+
+# Routenblöcke: (Startzeit, Dauer) - Dauer 3.0 s, aufgerundet aus Mittelwert
+route_blocks = [(0.5, 3.0), (5.0, 3.0), (9.5, 3.0)]
+
+# Geschwindigkeits-Envelope (Beschleunigung/Verzögerung pro Route)
+envelope = np.zeros_like(t)
+for t_start, duration in route_blocks:
+    mask = (t >= t_start) & (t < t_start + duration)
+    t_rel = t[mask] - t_start
+    env = np.ones_like(t_rel)
+    env *= np.minimum(t_rel / 0.5, 1.0)  # Anlauf (0.5 s)
+    env *= np.minimum((duration - t_rel) / 0.3, 1.0)  # Auslauf (0.3 s)
+    envelope[mask] = env
+
+# Periodische Schrittoszillation
+stride = A_STRIDE * np.sin(2 * np.pi * F_STRIDE * t) + A_HARM * np.sin(
+    2 * np.pi * 2 * F_STRIDE * t
+)
+
+# Referenzsignal: Envelope * (Basisgeschwindigkeit + Schrittoszillation)
+v_ref = envelope * (V_PEAK + stride)
+
+# Break-Muster (HITCH-Signatur) bei Route 1 und 3
+t_breaks = [2.5, 11.5]
+for tb in t_breaks:
+    v_ref -= BREAK_DEPTH * np.exp(-(((t - tb) / BREAK_WIDTH) ** 2)) * envelope
+
+# Rauschen (realistisch, nur bei Bewegung)
+np.random.seed(42)
+v_ref += 0.08 * np.random.randn(len(t)) * (envelope > 0.1)
+v_ref = np.maximum(v_ref, 0)
+
+# === Visualisierung ===
+fig, ax = plt.subplots(figsize=(12, 4))
+
+ax.plot(t, v_ref, linewidth=0.7, color="C0")
+for i, (ts, dur) in enumerate(route_blocks):
+    ax.axvspan(ts, ts + dur, alpha=0.06, color="C0")
+    ax.text(ts + dur / 2, 7.8, f"Route {i + 1}", ha="center", fontsize=9, color="C0")
+for tb in t_breaks:
+    ax.annotate(
+        "Break",
+        xy=(tb, v_ref[np.argmin(np.abs(t - tb))]),
+        xytext=(tb + 0.5, 1.0),
+        fontsize=8,
+        color="red",
+        arrowprops=dict(arrowstyle="->", color="red", lw=1),
+    )
+
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Geschwindigkeit (yards/s)")
+ax.set_title(
+    f"Synthetisches Routenmodell ($f_{{stride}}$ = {F_STRIDE} Hz, $f_s$ = {FS_REF} Hz)"
+)
+ax.set_ylim(-0.5, 8.5)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Die realen Nacua-Daten zeigen, dass alle Routentypen eine gemeinsame Beschleunigungsphase in den ersten 0.5-1.0 Sekunden aufweisen. Gleiche Routentypen erzeugen ähnliche Geschwindigkeitsverläufe: HITCH (blau) und SLANT (orange) erreichen moderate Spitzengeschwindigkeiten (5-7 yards/s), während GO (rot) und CORNER (lila) höhere Werte (7-8 yards/s) über längere Dauern zeigen. Die quantitative Parameterherleitung ergibt einen mittleren v_max von ~6.0 yards/s und eine mittlere Routendauer von ~2.2 s über alle 12 Target-Plays. Das synthetische Modell verwendet V_PEAK = 6.5 yards/s, da dieser Wert die Sprint-Phase (ohne die langsamere Anlaufphase) besser repräsentiert, und eine Routendauer von 3.0 s. Das synthetische Routenmodell enthält drei Routenblöcke mit periodischer Schritt-Oszillation bei 3.0 Hz und zwei eingebettete Break-Muster bei t = 2.5 s und t = 11.5 s (Route 1 und 3), die als Grundlage für Auto- und Cross-Korrelation dienen.
+
+### Signalcharakteristik und Begründung für Korrelationsanalyse
+
+Das synthetische Geschwindigkeitssignal enthält zwei Ebenen wiederkehrender Strukturen:
+
+1. **Schrittfrequenz ($f_{stride}$ = 3.0 Hz):** Während des Sprints erzeugt jeder Schritt eine periodische Geschwindigkeitsoszillation. Diese Mikro-Periodizität ist über alle Routenblöcke konsistent und eignet sich für die Detektion via Auto-Korrelation.
+
+2. **Routenstruktur (quasi-periodisch, ~4.5 s Abstand):** Die Abfolge von Sprint-Phasen und Pausen erzeugt eine Makro-Periodizität auf der Ebene ganzer Routen. Auto-Korrelation kann die Regelmässigkeit dieser Wiederholungen quantifizieren.
+
+3. **Identifizierbare Segmente (Break-Muster):** Das HITCH-typische Break-Muster (scharfe Geschwindigkeitsreduktion) erscheint an zwei definierten Positionen im Signal (t = 2.5 s und t = 11.5 s) und dient als Template für die Cross-Korrelation.
+
+**Begründung für Korrelation gegenüber alternativen Methoden:**
+- **FFT/Spektralanalyse** eignet sich zur Identifikation globaler Frequenzkomponenten, kann aber keine zeitliche Lokalisierung von Segmenten leisten und setzt Stationarität voraus, die bei Routensignalen nicht gegeben ist.
+- **Dynamic Time Warping (DTW)** erlaubt nicht-lineare Zeitalignment, ist aber rechenintensiv und für die Detektion einfacher periodischer Muster überdimensioniert.
+- **Korrelationsanalyse** bietet den Vorteil, sowohl globale Periodizität (Auto-Korrelation) als auch zeitliche Segmentlokalisierung (Cross-Korrelation) in einem einheitlichen methodischen Rahmen zu adressieren, ohne Annahmen über Stationarität oder Signalform zu erfordern.
+
+**Einschränkungen der Datenbasis:**
+- Die realen Daten umfassen nur 12 Nacua-Target-Plays pro Spiel mit variablen Dauern (1.4-4.0 s), was die Anzahl verfügbarer Routenwiederholungen für die Korrelationsanalyse begrenzt.
+- Die 10 Hz Sampling Rate der NFL-Daten kann Schrittoszillationen nicht vollständig auflösen. Das synthetische Modell bei 100 Hz umgeht diese Limitation und erlaubt die Untersuchung der Korrelationseigenschaften unter idealen Bedingungen.
+- Die Geschwindigkeitsprofile sind nicht-stationär (transiente Beschleunigungsphase), was die Interpretation der Auto-Korrelation bei kurzen Lag-Bereichen beeinflussen kann.
+
+---
+
+## Tag 7 – Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet die Prinzipien der Auto-Korrelation und Cross-Korrelation auf das synthetische Routengeschwindigkeitssignal an, um zwei komplementäre analytische Ziele zu adressieren:
+
+**Auto-Korrelation** quantifiziert die Selbstähnlichkeit eines Signals $x(t)$ bei verschiedenen Zeitverschiebungen $\tau$ (Lags):
+
+$$R_{xx}(\tau) = \sum_{n} x(n) \cdot x(n + \tau)$$
+
+Sie eignet sich für unser Signal, weil die periodische Schrittoszillation ($f_{stride}$ = 3.0 Hz) und die quasi-periodische Routenstruktur (~4.5 s Abstand) zu Peaks im Korrelogramm bei den entsprechenden Lag-Werten führen. Im Gegensatz zur FFT erfordert die Auto-Korrelation keine Stationarität und kann Periodizität auch in Signalen mit transienten Phasen (Beschleunigung, Pausen) detektieren.
+
+**Cross-Korrelation** quantifiziert die Ähnlichkeit zwischen einem Template-Signal $h(t)$ und einem Zielsignal $x(t)$ als Funktion der Verschiebung:
+
+$$R_{xh}(\tau) = \sum_{n} x(n) \cdot h(n + \tau)$$
+
+Sie eignet sich für die Lokalisierung des Break-Musters (HITCH-Signatur), da sie das Template systematisch über das gesamte Signal schiebt und an den Positionen maximaler Übereinstimmung Peaks erzeugt. Erwartete Peaks: $\tau$ entsprechend t = 2.5 s und t = 11.5 s.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+**Signalparameter:**
+- Sampling Rate: $f_s$ = 100 Hz, Signaldauer: 15.0 s, N = 1500 Samples
+- Erwartete Periodizitäten: Schrittperiode $T_{stride}$ = 1/3.0 Hz = 0.33 s (33 Samples), Routenabstand ~4.5 s (450 Samples)
+
+**Auto-Korrelation:**
+- Lag-Bereich: 0 bis $N/2$ = 750 Samples (7.5 s) - ausreichend für mindestens eine volle Routenperiode
+- Normalisierung: normiert ($\hat{R}_{xx}(\tau) = R_{xx}(\tau) / R_{xx}(0)$), damit $\hat{R}_{xx}(0) = 1$ und Werte in [-1, 1] liegen. Dies ermöglicht die direkte Interpretation der Peak-Höhen als Ähnlichkeitsmass unabhängig von der Signalamplitude.
+
+**Cross-Korrelation:**
+- Template: Break-Muster aus Route 1, extrahiert als Fenster um t = 2.5 s. Baseline-Fensterlänge: 0.5 s (50 Samples), zentriert auf den Break-Zeitpunkt.
+- Normalisierung: normierte Cross-Korrelation (Pearson), um amplitudenunabhängige Detektion zu ermöglichen.
+- Detektionskriterium: Peaks in $R_{xh}(\tau)$ oberhalb eines Schwellwerts identifizieren die Positionen des Break-Musters im Signal.
+
+### Experimentelles Design für die nächsten Tage
+*Fokus: strukturierte Parametervariation und theoretische Vorhersage*
+
+**Baseline-Konfiguration (Tag 8):**
+- Auto-Korrelation: normiert, Lag-Bereich 0-750 Samples, volles Signal
+- Cross-Korrelation: normiert, Template-Länge 0.5 s (50 Samples), extrahiert bei t = 2.5 s
+
+**Parametervariation (Tag 9), systematisch variiert werden:**
+1. **Template-Länge** (Cross-Korrelation): 0.2 s, 0.5 s, 1.0 s, 1.5 s - untersucht den Trade-off zwischen Spezifität (langes Template) und Generalisierbarkeit (kurzes Template)
+2. **Lag-Bereich** (Auto-Korrelation): 250, 500, 750 Samples - untersucht, ob kurze Lag-Bereiche die Schrittperiodizität isolieren und lange Bereiche die Routenperiodizität erfassen
+3. **Normalisierung**: biased vs. unbiased Schätzung - biased ($1/N$) dämpft Peaks bei grossen Lags, unbiased ($1/(N-\tau)$) verstärkt sie
+
+**Robustheitsanalyse (Tag 9):**
+- Additives Rauschen: SNR-Stufen von 20 dB, 10 dB und 5 dB auf das Referenzsignal
+- Amplitudenvariation: Skalierung des Break-Musters auf 50% und 150% der Originaltiefe
+
+**Erwartete Effekte:**
+- Kürzere Templates erhöhen die Falsch-Positiv-Rate, da sie weniger spezifisch sind
+- Unbiased-Normalisierung verstärkt Rauschen bei grossen Lags und kann zu Artefakten führen
+- Rauschen reduziert die Peak-Höhe der Cross-Korrelation proportional zum SNR
+
+### Methodische Limitationen und Risikofaktoren
+*Fokus: Annahmen, Stabilität und potenzielle Fehlinterpretation*
+
+Die Auto-Korrelation nimmt implizit an, dass die periodischen Strukturen über die gesamte Signaldauer konsistent sind. In unserem Signal sind die Schrittoszillationen nur während der Routenblöcke aktiv (60% der Gesamtdauer), was die ACF-Peaks gegenüber einem durchgehend periodischen Signal abschwächt.
+
+Die Cross-Korrelation setzt voraus, dass das Break-Muster in Route 3 formähnlich zu Route 1 ist. Da das synthetische Modell identische Break-Parameter verwendet, ist dies gegeben. In realen Daten variiert die Form jedoch aufgrund von Spielsituation und Ermüdung, was die Detektionsleistung reduzieren kann.
+
+Beide Methoden sind empfindlich gegenüber der Normalisierungsstrategie: biased-Normalisierung unterdrückt korrekte Peaks bei grossen Lags, während unbiased-Normalisierung bei wenigen verfügbaren Datenpunkten instabil wird.
+
+---
+
+## Tag 8 – Implementierung
+
+### Auto-Korrelation: Periodizitätsdetektion
+*Fokus: Identifikation der Schrittperiodizität und Routenstruktur im Korrelogramm*
+
+```{python}
+from scipy.signal import find_peaks
+
+# === Auto-Korrelation (normiert, Baseline aus Tag 7) ===
+MAX_LAG = 750  # N/2 = 7.5 s
+
+# --- Vollsignal-ACF: Routenstruktur ---
+v_centered = v_ref - np.mean(v_ref)
+acf_full = np.correlate(v_centered, v_centered, mode="full")
+acf_full_pos = acf_full[len(v_centered) - 1 :][: MAX_LAG + 1]
+acf_full_norm = acf_full_pos / acf_full_pos[0]
+
+lags_full = np.arange(MAX_LAG + 1)
+lag_s_full = lags_full / FS_REF
+
+peaks_full, _ = find_peaks(acf_full_norm, height=0.1, distance=50, prominence=0.05)
+
+# --- Steady-State-ACF: Schrittperiodizitaet ---
+# Isolation des Plateaus von Route 2 (5.5-7.7 s), da:
+# (1) Route 2 hat keinen Break (saubere Periodizitaet)
+# (2) Ramp-up (0.5 s) und Ramp-down (0.3 s) werden ausgeschlossen,
+#     weil die Envelope-Aenderung die ACF dominiert und Stride-Peaks maskiert
+SS_START, SS_END = 5.5, 7.7
+mask_ss = (t >= SS_START) & (t < SS_END)
+v_ss = v_ref[mask_ss]
+v_ss_centered = v_ss - np.mean(v_ss)
+
+max_lag_ss = len(v_ss) // 2
+acf_ss = np.correlate(v_ss_centered, v_ss_centered, mode="full")
+acf_ss = acf_ss[len(v_ss) - 1 :][: max_lag_ss + 1]
+acf_ss_norm = acf_ss / acf_ss[0]
+
+lags_ss = np.arange(max_lag_ss + 1)
+lag_s_ss = lags_ss / FS_REF
+
+peaks_ss, _ = find_peaks(acf_ss_norm, height=0.1, distance=10, prominence=0.05)
+
+# --- Zwischenergebnisse ---
+T_STRIDE = 1 / F_STRIDE  # 0.333 s
+
+print("Steady-State-ACF (Route 2, 5.5-7.7 s): Schrittperiodizitaet")
+print("=" * 60)
+print(f"{'Lag':>6} {'Zeit (s)':>9} {'R_xx':>8}  Interpretation")
+print("-" * 60)
+for p in peaks_ss[:6]:
+    t_lag = p / FS_REF
+    for mult in range(1, 10):
+        if abs(t_lag - mult * T_STRIDE) < 0.04:
+            print(
+                f"{p:>6d} {t_lag:>9.3f} {acf_ss_norm[p]:>8.4f}  "
+                f"{mult}x T_stride ({mult * T_STRIDE:.3f} s)"
+            )
+            break
+
+if len(peaks_ss) > 0:
+    detected_stride = peaks_ss[0] / FS_REF
+    print(
+        f"\nDetektierte Schrittperiode: {detected_stride:.4f} s "
+        f"(erwartet: {T_STRIDE:.4f} s, "
+        f"Abweichung: {abs(detected_stride - T_STRIDE)*1000:.1f} ms)"
+    )
+
+print(f"\nVollsignal-ACF: Routenstruktur")
+print("=" * 60)
+for p in peaks_full[:5]:
+    t_lag = p / FS_REF
+    interp = "Routenabstand" if 4.0 < t_lag < 5.0 else ""
+    print(f"  Lag = {p:>4d} ({t_lag:.3f} s) | R_xx = {acf_full_norm[p]:.4f}  {interp}")
+
+# --- Visualisierung ---
+fig, axes = plt.subplots(3, 1, figsize=(12, 8), height_ratios=[0.7, 1, 1])
+
+# Signal mit Steady-State hervorgehoben
+axes[0].plot(t, v_ref, linewidth=0.6, color="C0", alpha=0.4)
+axes[0].plot(t[mask_ss], v_ss, linewidth=0.8, color="C0")
+axes[0].axvspan(
+    SS_START,
+    SS_END,
+    alpha=0.1,
+    color="C0",
+    label=f"Steady-State ({SS_START}-{SS_END} s)",
+)
+axes[0].set_ylabel("v (yards/s)")
+axes[0].set_title("Routensignal (Steady-State-Segment hervorgehoben)")
+axes[0].legend(fontsize=9, loc="upper right")
+axes[0].grid(True, alpha=0.3)
+
+# Steady-State ACF: Schrittperiodizitaet
+axes[1].plot(lag_s_ss, acf_ss_norm, linewidth=0.8, color="C1")
+axes[1].plot(lag_s_ss[peaks_ss], acf_ss_norm[peaks_ss], "v", color="red", markersize=7)
+for mult in range(1, 4):
+    t_exp = mult * T_STRIDE
+    if t_exp <= lag_s_ss[-1]:
+        axes[1].axvline(t_exp, color="green", alpha=0.3, ls="--", lw=0.8)
+axes[1].set_ylabel("$R_{xx}(\\tau)$")
+axes[1].set_title(
+    f"ACF Steady-State: Schrittperiodizitaet | "
+    f"$T_{{stride}}$ = {T_STRIDE:.3f} s (gestrichelt)"
+)
+axes[1].grid(True, alpha=0.3)
+axes[1].set_xlim(0, lag_s_ss[-1])
+
+# Vollsignal ACF: Routenstruktur
+axes[2].plot(lag_s_full, acf_full_norm, linewidth=0.7, color="C1")
+if len(peaks_full) > 0:
+    axes[2].plot(
+        lag_s_full[peaks_full],
+        acf_full_norm[peaks_full],
+        "v",
+        color="red",
+        markersize=6,
+    )
+axes[2].axvline(
+    4.5, color="orange", alpha=0.5, ls="--", lw=1.2, label="Routenabstand ~4.5 s"
+)
+axes[2].set_xlabel("Lag $\\tau$ (s)")
+axes[2].set_ylabel("$R_{xx}(\\tau)$")
+axes[2].set_title(f"ACF Vollsignal: Routenstruktur (Lag 0-{MAX_LAG/FS_REF:.1f} s)")
+axes[2].legend(fontsize=9)
+axes[2].grid(True, alpha=0.3)
+axes[2].set_xlim(0, lag_s_full[-1])
+
+plt.tight_layout()
+plt.show()
+```
+
+### Cross-Korrelation: Break-Muster-Detektion
+*Fokus: Lokalisierung der HITCH-Signatur mittels Template-Matching*
+
+```{python}
+# --- Template-Extraktion (Baseline aus Tag 7) ---
+TMPL_DURATION = 0.5  # s (50 Samples)
+TMPL_CENTER = 2.5  # s (Break in Route 1)
+
+tmpl_half = int(TMPL_DURATION * FS_REF / 2)
+center_idx = int(TMPL_CENTER * FS_REF)
+template = v_ref[center_idx - tmpl_half : center_idx + tmpl_half]
+t_template = np.arange(len(template)) / FS_REF - TMPL_DURATION / 2
+
+print(
+    f"Template: {len(template)} Samples ({TMPL_DURATION} s), "
+    f"extrahiert bei t = {TMPL_CENTER} s"
+)
+print(f"Wertebereich: [{template.min():.2f}, {template.max():.2f}] yards/s")
+
+
+# --- Normierte Cross-Korrelation (Pearson, Sliding Window) ---
+def normalized_xcorr(signal, template):
+    """Normierte Cross-Korrelation (Pearson) zwischen Signal und Template.
+
+    R_xh(i) = sum((x_i - mean(x_i)) * (h - mean(h))) / (||x_i|| * ||h||)
+
+    Rueckgabe: Array der Laenge len(signal) - len(template) + 1
+    """
+    n = len(template)
+    m = len(signal) - n + 1
+    ccf = np.zeros(m)
+
+    tmpl_centered = template - np.mean(template)
+    tmpl_energy = np.sqrt(np.sum(tmpl_centered**2))
+
+    for i in range(m):
+        segment = signal[i : i + n]
+        seg_centered = segment - np.mean(segment)
+        seg_energy = np.sqrt(np.sum(seg_centered**2))
+        if seg_energy > 1e-10:
+            ccf[i] = np.sum(seg_centered * tmpl_centered) / (seg_energy * tmpl_energy)
+
+    return ccf
+
+
+ccf = normalized_xcorr(v_ref, template)
+
+# Zeitachse: Position des Template-Zentrums
+t_ccf = np.arange(len(ccf)) / FS_REF + TMPL_DURATION / 2
+
+# --- Peak-Detektion ---
+# Verfeinerung: Schwellwert von 0.5 (Tag 7) auf 0.9 erhoeht,
+# da Routenuebergaenge (Beschleunigung/Verzoegerung) False Positives
+# bei R = 0.78-0.83 erzeugten.
+THRESHOLD = 0.9
+peaks_ccf, _ = find_peaks(ccf, height=THRESHOLD, distance=100, prominence=0.05)
+
+# --- Zwischenergebnis ---
+t_breaks_expected = [2.5, 11.5]
+
+print(f"\nCross-Korrelation: Detektion (Schwellwert = {THRESHOLD})")
+print("=" * 65)
+print(
+    f"{'#':>3} {'t_detect (s)':>12} {'R_xh':>8}  "
+    f"{'t_erwartet (s)':>15} {'Fehler (ms)':>12}"
+)
+print("-" * 65)
+for i, p in enumerate(peaks_ccf):
+    t_det = t_ccf[p]
+    errors = [abs(t_det - tb) for tb in t_breaks_expected]
+    closest_idx = np.argmin(errors)
+    closest = t_breaks_expected[closest_idx]
+    error_ms = errors[closest_idx] * 1000
+    print(
+        f"{i+1:>3d} {t_det:>12.3f} {ccf[p]:>8.4f}  "
+        f"{closest:>15.1f} {error_ms:>12.1f}"
+    )
+
+print(
+    f"\nErgebnis: {len(peaks_ccf)}/{len(t_breaks_expected)} "
+    f"Break-Positionen korrekt detektiert"
+)
+
+# --- Visualisierung ---
+fig, axes = plt.subplots(3, 1, figsize=(12, 8), height_ratios=[0.5, 1, 1])
+
+# Template
+axes[0].plot(t_template * 1000, template, linewidth=1.2, color="C3")
+axes[0].fill_between(t_template * 1000, template, alpha=0.12, color="C3")
+axes[0].set_xlabel("Zeit relativ zum Break-Zentrum (ms)")
+axes[0].set_ylabel("v (yards/s)")
+axes[0].set_title(
+    f"Template: Break-Muster ({len(template)} Samples, "
+    f"extrahiert bei t = {TMPL_CENTER} s)"
+)
+axes[0].grid(True, alpha=0.3)
+
+# Cross-Korrelogramm
+axes[1].plot(t_ccf, ccf, linewidth=0.7, color="C2")
+axes[1].plot(
+    t_ccf[peaks_ccf],
+    ccf[peaks_ccf],
+    "v",
+    color="red",
+    markersize=8,
+    label="Detektierte Peaks",
+)
+for tb in t_breaks_expected:
+    axes[1].axvline(tb, color="orange", alpha=0.4, ls="--", lw=1.0)
+axes[1].axhline(
+    THRESHOLD, color="gray", alpha=0.4, ls=":", label=f"Schwellwert ({THRESHOLD})"
+)
+axes[1].set_ylabel("$R_{xh}(\\tau)$")
+axes[1].set_title("Normierte Cross-Korrelation (Pearson)")
+axes[1].legend(fontsize=9)
+axes[1].grid(True, alpha=0.3)
+
+# Signal mit Detektionen
+axes[2].plot(t, v_ref, linewidth=0.6, color="C0", alpha=0.7)
+for i, (ts, dur) in enumerate(route_blocks):
+    axes[2].axvspan(ts, ts + dur, alpha=0.04, color="C0")
+for i, p in enumerate(peaks_ccf):
+    t_det = t_ccf[p]
+    axes[2].axvline(t_det, color="red", alpha=0.6, ls="-", lw=1.5)
+    axes[2].annotate(
+        f"Detektion {i+1}\nt = {t_det:.2f} s",
+        xy=(t_det, 0.5),
+        xytext=(t_det + 0.6, 1.8),
+        fontsize=8,
+        color="red",
+        arrowprops=dict(arrowstyle="->", color="red", lw=0.8),
+    )
+for tb in t_breaks_expected:
+    axes[2].axvline(tb, color="orange", alpha=0.3, ls="--", lw=1.0)
+axes[2].set_xlabel("Zeit (s)")
+axes[2].set_ylabel("v (yards/s)")
+axes[2].set_title(
+    "Signal mit detektierten Break-Positionen (rot) vs. erwartet (orange)"
+)
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+- **ACF -- Schrittperiodizitaet:** Im Vollsignal-ACF ist die Schrittperiodizitaet nicht erkennbar, da Pausenphasen und Envelope-Transienten die ACF dominieren. Durch Isolation des Steady-State-Segments (Route 2, 5.5-7.7 s, ohne Ramp-up/down) wird die Schrittperiode $T_{stride}$ = 0.333 s sauber detektiert. Dies bestaetigt die in Tag 7 diskutierte Limitation nicht-kontinuierlicher Periodizitaet.
+- **ACF -- Routenstruktur:** Das Vollsignal-ACF zeigt einen Peak bei ~4.5 s, der dem Abstand zwischen den Routenbloecken entspricht.
+- **CCF -- Break-Detektion:** Beide Break-Positionen (t = 2.5 s, t = 11.5 s) werden mit R > 0.99 korrekt detektiert. Route 2 (ohne Break) erzeugt keinen False Positive.
+- **Parameterverfeinerung:** Zwei Anpassungen gegenueber der Tag-7-Baseline: (1) Steady-State-Isolation fuer die Schritt-ACF (Envelope maskiert Stride-Peaks), (2) CCF-Schwellwert von 0.5 auf 0.9 erhoeht (Routenuebergaenge erzeugten False Positives bei R = 0.78-0.83).
+
+---
+
+## Tag 9 – Evaluation
+
+### Evaluationsmetriken: Definition und Begründung
+*Fokus: quantitative Bewertung von Periodizitätsdetektion und Segmentlokalisierung*
+
+Für die systematische Bewertung der Auto-Korrelation und Cross-Korrelation werden zwei quantitative Evaluationsansätze definiert:
+
+**Metrik 1 -- Lag Precision Error (ACF):**
+Der Lag Precision Error quantifiziert die Genauigkeit der Periodizitätsdetektion als absolute Abweichung zwischen detektiertem und erwartetem Lag:
+
+$$\text{LPE} = |T_{\text{detected}} - T_{\text{expected}}| \quad \text{(in ms)}$$
+
+Diese Metrik ist geeignet, weil die präzise Bestimmung der Schrittperiode ($T_{stride}$ = 333.3 ms) und des Routenabstands (~4500 ms) die Grundlage für biomechanische Leistungsvergleiche in der NFL-Analytik bildet. Sie erfasst die zeitliche Auflösungsgenauigkeit der ACF-Peaks.
+
+**Metrik 2 -- Detection Performance (CCF):**
+Die Detektionsleistung der Cross-Korrelation wird durch drei Komponenten bewertet:
+
+| Komponente | Definition | Erfasster Aspekt |
+|---|---|---|
+| **Detection Rate** | $\frac{\text{\#TP}}{\text{\#True Breaks}}$, TP falls Peak innerhalb $\pm$50 ms | Vollständigkeit der Detektion |
+| **Localization Error** | $\bar{|\Delta t|} = \frac{1}{N_{TP}} \sum |t_{det} - t_{exp}|$ (ms) | Räumliche Präzision |
+| **Peak $R_{xh}$** | Korrelationswert am detektierten Peak | Detektionskonfidenz |
+
+Die Toleranz von $\pm$50 ms (5 Samples bei 100 Hz) entspricht der zeitlichen Auflösung, die für die taktische Analyse relevant ist. Die Kombination aus Rate, Präzision und Konfidenz erlaubt eine differenzierte Bewertung der Detektionsqualität über verschiedene Parameterkonfigurationen.
+
+```{python}
+# === Evaluations-Hilfsfunktionen ===
+
+
+def evaluate_ccf_detection(
+    signal, template, fs, t_breaks_true, threshold=0.9, tolerance_ms=50
+):
+    """Berechnet Detection Performance Metriken fuer Cross-Korrelation.
+
+    Returns: dict mit detection_rate, mean_loc_error_ms, mean_peak_rxh,
+             n_tp, n_fp, detected_times, detected_rxh
+    """
+    ccf_vals = normalized_xcorr(signal, template)
+    tmpl_dur = len(template) / fs
+    t_ccf_vals = np.arange(len(ccf_vals)) / fs + tmpl_dur / 2
+
+    peaks_idx, _ = find_peaks(
+        ccf_vals, height=threshold, distance=int(0.5 * fs), prominence=0.05
+    )
+
+    tol_s = tolerance_ms / 1000
+    tp_errors = []
+    matched_true = set()
+
+    for p in peaks_idx:
+        t_det = t_ccf_vals[p]
+        dists = [(i, abs(t_det - tb)) for i, tb in enumerate(t_breaks_true)]
+        closest_i, closest_d = min(dists, key=lambda x: x[1])
+        if closest_d <= tol_s and closest_i not in matched_true:
+            tp_errors.append(closest_d * 1000)
+            matched_true.add(closest_i)
+
+    n_tp = len(matched_true)
+    n_fp = len(peaks_idx) - n_tp
+    det_rate = n_tp / len(t_breaks_true) if t_breaks_true else 0
+    mean_err = np.mean(tp_errors) if tp_errors else float("nan")
+    mean_rxh = np.mean(ccf_vals[peaks_idx]) if len(peaks_idx) > 0 else float("nan")
+
+    return {
+        "detection_rate": det_rate,
+        "mean_loc_error_ms": mean_err,
+        "mean_peak_rxh": mean_rxh,
+        "n_tp": n_tp,
+        "n_fp": n_fp,
+        "t_ccf": t_ccf_vals,
+        "ccf": ccf_vals,
+        "peak_indices": peaks_idx,
+    }
+
+
+def evaluate_acf_stride(signal, fs, expected_period_s, max_lag_samples):
+    """Berechnet Lag Precision Error fuer die Schrittperiodizitaet.
+
+    Returns: dict mit detected_period_s, lpe_ms, peak_height, lags_s, acf_norm
+    """
+    v_c = signal - np.mean(signal)
+    acf = np.correlate(v_c, v_c, mode="full")
+    acf_pos = acf[len(v_c) - 1 :][: max_lag_samples + 1]
+    acf_norm = acf_pos / acf_pos[0]
+
+    lags = np.arange(max_lag_samples + 1)
+    lags_s = lags / fs
+
+    min_lag = int(expected_period_s * fs * 0.5)
+    peaks_idx, props = find_peaks(
+        acf_norm[min_lag:], height=0.05, distance=10, prominence=0.03
+    )
+    peaks_idx = peaks_idx + min_lag
+
+    if len(peaks_idx) > 0:
+        first_peak = peaks_idx[0]
+        detected = first_peak / fs
+        lpe = abs(detected - expected_period_s) * 1000
+        height = acf_norm[first_peak]
+    else:
+        detected = float("nan")
+        lpe = float("nan")
+        height = float("nan")
+
+    return {
+        "detected_period_s": detected,
+        "lpe_ms": lpe,
+        "peak_height": height,
+        "lags_s": lags_s,
+        "acf_norm": acf_norm,
+    }
+```
+
+### Parameterraum-Exploration
+*Fokus: systematische Variation von 3 Parametern relativ zur Tag-8-Baseline*
+
+**Baseline-Konfiguration:**
+- ACF: normiert, Max-Lag = 750 Samples (7.5 s), Steady-State-Segment (5.5--7.7 s)
+- CCF: normierter Pearson, Template-Laenge = 0.5 s (50 Samples), Schwellwert = 0.9
+
+#### Parameter 1: Template-Laenge (Cross-Korrelation)
+*Trade-off: Spezifitaet (langes Template) vs. Generalisierbarkeit (kurzes Template)*
+
+```{python}
+# === Parameter 1: Template-Laenge (CCF) ===
+template_durations = [0.2, 0.5, 1.0, 1.5]  # Sekunden
+t_breaks_true = [2.5, 11.5]
+
+results_tmpl = []
+fig, axes = plt.subplots(
+    len(template_durations), 1, figsize=(12, 3 * len(template_durations)), sharex=True
+)
+
+for i, dur in enumerate(template_durations):
+    half = int(dur * FS_REF / 2)
+    center = int(TMPL_CENTER * FS_REF)
+    tmpl = v_ref[max(0, center - half) : center + half]
+
+    res = evaluate_ccf_detection(v_ref, tmpl, FS_REF, t_breaks_true, threshold=0.9)
+    res["duration_s"] = dur
+    res["n_samples"] = len(tmpl)
+    results_tmpl.append(res)
+
+    is_baseline = dur == 0.5
+    label = f"{dur} s ({len(tmpl)} Samples)" + (" [Baseline]" if is_baseline else "")
+    lw = 1.2 if is_baseline else 0.7
+    axes[i].plot(res["t_ccf"], res["ccf"], linewidth=lw, color="C2")
+    if len(res["peak_indices"]) > 0:
+        axes[i].plot(
+            res["t_ccf"][res["peak_indices"]],
+            res["ccf"][res["peak_indices"]],
+            "v",
+            color="red",
+            markersize=7,
+        )
+    for tb in t_breaks_true:
+        axes[i].axvline(tb, color="orange", alpha=0.4, ls="--", lw=0.8)
+    axes[i].axhline(0.9, color="gray", alpha=0.3, ls=":")
+    axes[i].set_ylabel("$R_{xh}$")
+    axes[i].set_title(label, fontsize=10)
+    axes[i].set_ylim(-0.5, 1.1)
+    axes[i].grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle("Cross-Korrelation: Variation der Template-Laenge", fontsize=12, y=1.01)
+plt.tight_layout()
+plt.show()
+
+# --- Vergleichstabelle ---
+print("Template-Laenge: Vergleichstabelle")
+print("=" * 80)
+print(
+    f"{'Laenge':>8} {'Samples':>8} {'Det. Rate':>10} {'Loc. Err (ms)':>14} "
+    f"{'Peak R_xh':>10} {'TP':>4} {'FP':>4}"
+)
+print("-" * 80)
+for r in results_tmpl:
+    bl = " *" if r["duration_s"] == 0.5 else ""
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{r['duration_s']:>7.1f}s {r['n_samples']:>8d} {r['detection_rate']:>10.0%} "
+        f"{err_str:>14} {rxh_str:>10} {r['n_tp']:>4d} {r['n_fp']:>4d}{bl}"
+    )
+print("\n* = Baseline")
+```
+
+#### Parameter 2: Lag-Bereich (Auto-Korrelation)
+*Effekt: kurze Lags isolieren Schrittperiodizitaet, lange Lags erfassen Routenstruktur*
+
+```{python}
+# === Parameter 2: Lag-Bereich (ACF, Steady-State) ===
+lag_configs = [250, 500, 750]  # Samples
+T_STRIDE_EXPECTED = 1 / F_STRIDE  # 0.333 s
+
+# Steady-State-Segment (Route 2, wie Tag 8)
+v_ss_eval = v_ref[mask_ss]
+
+results_lag = []
+fig, axes = plt.subplots(1, len(lag_configs), figsize=(14, 3.5), sharey=True)
+
+for i, max_lag in enumerate(lag_configs):
+    actual_max = min(max_lag, len(v_ss_eval) // 2)
+    res = evaluate_acf_stride(v_ss_eval, FS_REF, T_STRIDE_EXPECTED, actual_max)
+    res["max_lag_config"] = max_lag
+    res["max_lag_actual"] = actual_max
+    results_lag.append(res)
+
+    is_baseline = max_lag == 750
+    label = f"Max-Lag = {max_lag}" + (" [Baseline]" if is_baseline else "")
+    axes[i].plot(res["lags_s"], res["acf_norm"], linewidth=0.8, color="C1")
+    for mult in range(1, 4):
+        t_exp = mult * T_STRIDE_EXPECTED
+        if t_exp <= res["lags_s"][-1]:
+            axes[i].axvline(t_exp, color="green", alpha=0.3, ls="--", lw=0.8)
+    axes[i].set_title(label, fontsize=10)
+    axes[i].set_xlabel("Lag $\\tau$ (s)")
+    axes[i].grid(True, alpha=0.3)
+
+axes[0].set_ylabel("$R_{xx}(\\tau)$")
+fig.suptitle("ACF Steady-State: Variation des Lag-Bereichs", fontsize=12, y=1.02)
+plt.tight_layout()
+plt.show()
+
+# --- Vergleichstabelle ---
+print("Lag-Bereich (ACF Steady-State): Vergleichstabelle")
+print("=" * 75)
+print(
+    f"{'Max-Lag':>8} {'Eff. Lag':>9} {'T_det (ms)':>11} {'LPE (ms)':>9} "
+    f"{'Peak R_xx':>10}"
+)
+print("-" * 75)
+for r in results_lag:
+    bl = " *" if r["max_lag_config"] == 750 else ""
+    det_str = (
+        f"{r['detected_period_s']*1000:.1f}"
+        if not np.isnan(r["detected_period_s"])
+        else "---"
+    )
+    lpe_str = f"{r['lpe_ms']:.1f}" if not np.isnan(r["lpe_ms"]) else "---"
+    h_str = f"{r['peak_height']:.4f}" if not np.isnan(r["peak_height"]) else "---"
+    print(
+        f"{r['max_lag_config']:>8d} {r['max_lag_actual']:>9d} {det_str:>11} "
+        f"{lpe_str:>9} {h_str:>10}{bl}"
+    )
+print(f"\nErwartet: T_stride = {T_STRIDE_EXPECTED*1000:.1f} ms")
+print("* = Baseline")
+```
+
+#### Parameter 3: Normalisierung (Auto-Korrelation)
+*Effekt: biased (1/N) daempft Peaks bei grossen Lags, unbiased (1/(N-τ)) verstaerkt Rauschen*
+
+```{python}
+# === Parameter 3: Normalisierung (ACF) ===
+# Vergleich: biased (1/N) vs. unbiased (1/(N-tau)) auf dem Vollsignal
+
+v_full_c = v_ref - np.mean(v_ref)
+N_full = len(v_full_c)
+MAX_LAG_NORM = 750
+
+acf_raw = np.correlate(v_full_c, v_full_c, mode="full")
+acf_raw_pos = acf_raw[N_full - 1 :][: MAX_LAG_NORM + 1]
+
+lags_norm = np.arange(MAX_LAG_NORM + 1)
+
+# Biased: R(tau) / N  (normiert auf R(0))
+acf_biased = acf_raw_pos / acf_raw_pos[0]
+
+# Unbiased: R(tau) / (N - tau)  (normiert auf R_unbiased(0))
+acf_unbiased_unnorm = acf_raw_pos / (N_full - lags_norm)
+acf_unbiased = acf_unbiased_unnorm / acf_unbiased_unnorm[0]
+
+# --- Stride-Detektion auf beiden Varianten (Steady-State) ---
+v_ss_c = v_ss_eval - np.mean(v_ss_eval)
+N_ss = len(v_ss_c)
+max_lag_ss_eval = N_ss // 2
+
+acf_ss_raw = np.correlate(v_ss_c, v_ss_c, mode="full")
+acf_ss_raw_pos = acf_ss_raw[N_ss - 1 :][: max_lag_ss_eval + 1]
+lags_ss_eval = np.arange(max_lag_ss_eval + 1)
+
+acf_ss_biased = acf_ss_raw_pos / acf_ss_raw_pos[0]
+acf_ss_unbiased_unnorm = acf_ss_raw_pos / (N_ss - lags_ss_eval)
+acf_ss_unbiased = acf_ss_unbiased_unnorm / acf_ss_unbiased_unnorm[0]
+
+# Peak-Detektion fuer Stride
+min_lag_stride = int(T_STRIDE_EXPECTED * FS_REF * 0.5)
+
+norm_results = {}
+for name, acf_data in [("biased", acf_ss_biased), ("unbiased", acf_ss_unbiased)]:
+    pks, _ = find_peaks(
+        acf_data[min_lag_stride:], height=0.05, distance=10, prominence=0.03
+    )
+    pks = pks + min_lag_stride
+    if len(pks) > 0:
+        det_t = pks[0] / FS_REF
+        lpe = abs(det_t - T_STRIDE_EXPECTED) * 1000
+        norm_results[name] = {"T_det": det_t, "LPE": lpe, "peak_h": acf_data[pks[0]]}
+    else:
+        norm_results[name] = {
+            "T_det": float("nan"),
+            "LPE": float("nan"),
+            "peak_h": float("nan"),
+        }
+
+# --- Visualisierung ---
+fig, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+
+# Vollsignal
+axes[0].plot(
+    lags_norm / FS_REF, acf_biased, linewidth=0.7, color="C1", label="Biased (1/N)"
+)
+axes[0].plot(
+    lags_norm / FS_REF,
+    acf_unbiased,
+    linewidth=0.7,
+    color="C3",
+    label="Unbiased (1/(N-$\\tau$))",
+    alpha=0.8,
+)
+axes[0].set_ylabel("$R_{xx}(\\tau)$")
+axes[0].set_title("Vollsignal: biased vs. unbiased Normalisierung")
+axes[0].legend(fontsize=9)
+axes[0].grid(True, alpha=0.3)
+
+# Steady-State
+lags_ss_s = lags_ss_eval / FS_REF
+axes[1].plot(lags_ss_s, acf_ss_biased, linewidth=0.8, color="C1", label="Biased (1/N)")
+axes[1].plot(
+    lags_ss_s,
+    acf_ss_unbiased,
+    linewidth=0.8,
+    color="C3",
+    label="Unbiased (1/(N-$\\tau$))",
+    alpha=0.8,
+)
+for mult in range(1, 4):
+    t_exp = mult * T_STRIDE_EXPECTED
+    if t_exp <= lags_ss_s[-1]:
+        axes[1].axvline(t_exp, color="green", alpha=0.3, ls="--", lw=0.8)
+axes[1].set_xlabel("Lag $\\tau$ (s)")
+axes[1].set_ylabel("$R_{xx}(\\tau)$")
+axes[1].set_title("Steady-State: biased vs. unbiased Normalisierung")
+axes[1].legend(fontsize=9)
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# --- Vergleichstabelle ---
+print("Normalisierung (ACF Steady-State): Vergleichstabelle")
+print("=" * 65)
+print(f"{'Methode':>12} {'T_det (ms)':>11} {'LPE (ms)':>9} {'Peak R_xx':>10}")
+print("-" * 65)
+for name in ["biased", "unbiased"]:
+    r = norm_results[name]
+    bl = " *" if name == "biased" else ""
+    print(
+        f"{name:>12} {r['T_det']*1000:>11.1f} {r['LPE']:>9.1f} {r['peak_h']:>10.4f}{bl}"
+    )
+print(f"\nErwartet: T_stride = {T_STRIDE_EXPECTED*1000:.1f} ms")
+print("* = Baseline (biased = standard normierte ACF)")
+```
+
+### Robustheitsanalyse (Cross-Korrelation)
+*Fokus: Detektionsleistung unter realistischen Perturbationen*
+
+Die Robustheitsanalyse untersucht, wie stabil die Break-Detektion unter zwei realistischen Stoerungen bleibt. Das Baseline-Template (0.5 s, extrahiert bei t = 2.5 s) wird beibehalten und auf die modifizierten Signale angewendet.
+
+#### Perturbation 1: Additives Rauschen (SNR-Variation)
+*Begründung: Reale NFL-RFID-Trackingdaten enthalten Messrauschen der Zebra-Sensoren*
+
+```{python}
+# === Perturbation 1: Additives Rauschen ===
+snr_levels = [np.inf, 20, 10, 5]  # dB (inf = Baseline ohne zusaetzliches Rauschen)
+
+# Baseline-Template (aus Tag 8)
+tmpl_half_r = int(TMPL_DURATION * FS_REF / 2)
+center_idx_r = int(TMPL_CENTER * FS_REF)
+template_baseline = v_ref[center_idx_r - tmpl_half_r : center_idx_r + tmpl_half_r]
+
+results_snr = []
+fig, axes = plt.subplots(
+    len(snr_levels),
+    2,
+    figsize=(14, 3 * len(snr_levels)),
+    gridspec_kw={"width_ratios": [1, 1.5]},
+)
+
+for i, snr in enumerate(snr_levels):
+    if np.isinf(snr):
+        v_noisy = v_ref.copy()
+        label = "Baseline ($\\infty$ dB)"
+    else:
+        np.random.seed(100 + int(snr))
+        sig_power = np.mean(v_ref**2)
+        noise_power = sig_power / (10 ** (snr / 10))
+        noise = np.sqrt(noise_power) * np.random.randn(len(v_ref))
+        v_noisy = v_ref + noise
+        label = f"SNR = {snr} dB"
+
+    res = evaluate_ccf_detection(
+        v_noisy, template_baseline, FS_REF, t_breaks_true, threshold=0.9
+    )
+    res["snr_db"] = snr
+    results_snr.append(res)
+
+    # Signal
+    axes[i, 0].plot(t, v_noisy, linewidth=0.4, color="C0", alpha=0.7)
+    axes[i, 0].set_ylabel("v (yd/s)")
+    axes[i, 0].set_title(f"Signal: {label}", fontsize=9)
+    axes[i, 0].set_ylim(-2, 10)
+    axes[i, 0].grid(True, alpha=0.3)
+
+    # CCF
+    axes[i, 1].plot(res["t_ccf"], res["ccf"], linewidth=0.6, color="C2")
+    if len(res["peak_indices"]) > 0:
+        axes[i, 1].plot(
+            res["t_ccf"][res["peak_indices"]],
+            res["ccf"][res["peak_indices"]],
+            "v",
+            color="red",
+            markersize=6,
+        )
+    for tb in t_breaks_true:
+        axes[i, 1].axvline(tb, color="orange", alpha=0.4, ls="--", lw=0.8)
+    axes[i, 1].axhline(0.9, color="gray", alpha=0.3, ls=":")
+    axes[i, 1].set_ylabel("$R_{xh}$")
+    axes[i, 1].set_title(f"CCF: {label}", fontsize=9)
+    axes[i, 1].set_ylim(-0.5, 1.1)
+    axes[i, 1].grid(True, alpha=0.3)
+
+axes[-1, 0].set_xlabel("Zeit (s)")
+axes[-1, 1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Robustheit: Break-Detektion unter additivem Rauschen", fontsize=12, y=1.01
+)
+plt.tight_layout()
+plt.show()
+
+# --- Vergleichstabelle ---
+print("Additives Rauschen: Vergleichstabelle")
+print("=" * 80)
+print(
+    f"{'SNR (dB)':>9} {'Det. Rate':>10} {'Loc. Err (ms)':>14} "
+    f"{'Peak R_xh':>10} {'TP':>4} {'FP':>4}"
+)
+print("-" * 80)
+for r in results_snr:
+    snr_str = "inf" if np.isinf(r["snr_db"]) else f"{r['snr_db']:.0f}"
+    bl = " *" if np.isinf(r["snr_db"]) else ""
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{snr_str:>9} {r['detection_rate']:>10.0%} {err_str:>14} "
+        f"{rxh_str:>10} {r['n_tp']:>4d} {r['n_fp']:>4d}{bl}"
+    )
+print("\n* = Baseline")
+```
+
+#### Perturbation 2: Break-Amplitudenvariation
+*Begründung: Die Intensitaet eines Routenabbruchs variiert in realen Spielsituationen je nach Deckung, Ermuedung und taktischer Anpassung*
+
+```{python}
+# === Perturbation 2: Break-Amplitudenvariation ===
+break_scales = [0.5, 1.0, 1.5]  # Skalierungsfaktor der Break-Tiefe
+
+results_amp = []
+fig, axes = plt.subplots(
+    len(break_scales),
+    2,
+    figsize=(14, 3 * len(break_scales)),
+    gridspec_kw={"width_ratios": [1, 1.5]},
+)
+
+for i, scale in enumerate(break_scales):
+    # Signal mit modifizierter Break-Tiefe neu generieren
+    v_mod = envelope * (V_PEAK + stride)
+    for tb in t_breaks:
+        v_mod -= (
+            (BREAK_DEPTH * scale) * np.exp(-(((t - tb) / BREAK_WIDTH) ** 2)) * envelope
+        )
+    np.random.seed(42)
+    v_mod += 0.08 * np.random.randn(len(t)) * (envelope > 0.1)
+    v_mod = np.maximum(v_mod, 0)
+
+    res = evaluate_ccf_detection(
+        v_mod, template_baseline, FS_REF, t_breaks_true, threshold=0.9
+    )
+    res["break_scale"] = scale
+    res["break_depth_yds"] = BREAK_DEPTH * scale
+    results_amp.append(res)
+
+    is_baseline = scale == 1.0
+    label = f"Break-Tiefe = {BREAK_DEPTH * scale:.1f} yd/s ({scale:.0%})" + (
+        " [Baseline]" if is_baseline else ""
+    )
+
+    # Signal
+    axes[i, 0].plot(t, v_mod, linewidth=0.5, color="C0", alpha=0.7)
+    for tb_pos in t_breaks:
+        axes[i, 0].axvline(tb_pos, color="orange", alpha=0.3, ls="--", lw=0.8)
+    axes[i, 0].set_ylabel("v (yd/s)")
+    axes[i, 0].set_title(f"Signal: {label}", fontsize=9)
+    axes[i, 0].set_ylim(-1, 9)
+    axes[i, 0].grid(True, alpha=0.3)
+
+    # CCF
+    axes[i, 1].plot(res["t_ccf"], res["ccf"], linewidth=0.6, color="C2")
+    if len(res["peak_indices"]) > 0:
+        axes[i, 1].plot(
+            res["t_ccf"][res["peak_indices"]],
+            res["ccf"][res["peak_indices"]],
+            "v",
+            color="red",
+            markersize=6,
+        )
+    for tb_pos in t_breaks_true:
+        axes[i, 1].axvline(tb_pos, color="orange", alpha=0.4, ls="--", lw=0.8)
+    axes[i, 1].axhline(0.9, color="gray", alpha=0.3, ls=":")
+    axes[i, 1].set_ylabel("$R_{xh}$")
+    axes[i, 1].set_title(f"CCF: {label}", fontsize=9)
+    axes[i, 1].set_ylim(-0.5, 1.1)
+    axes[i, 1].grid(True, alpha=0.3)
+
+axes[-1, 0].set_xlabel("Zeit (s)")
+axes[-1, 1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Robustheit: Break-Detektion bei variierender Break-Amplitude", fontsize=12, y=1.01
+)
+plt.tight_layout()
+plt.show()
+
+# --- Vergleichstabelle ---
+print("Break-Amplitudenvariation: Vergleichstabelle")
+print("=" * 85)
+print(
+    f"{'Skala':>6} {'Tiefe (yd/s)':>13} {'Det. Rate':>10} {'Loc. Err (ms)':>14} "
+    f"{'Peak R_xh':>10} {'TP':>4} {'FP':>4}"
+)
+print("-" * 85)
+for r in results_amp:
+    bl = " *" if r["break_scale"] == 1.0 else ""
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{r['break_scale']:>5.0%} {r['break_depth_yds']:>13.1f} "
+        f"{r['detection_rate']:>10.0%} {err_str:>14} {rxh_str:>10} "
+        f"{r['n_tp']:>4d} {r['n_fp']:>4d}{bl}"
+    )
+print("\n* = Baseline")
+```
+
+### Zusammenfassung Tag 9
+
+```{python}
+# === Zusammenfassungstabelle: Parameterraum ===
+print("=" * 90)
+print("ZUSAMMENFASSUNG: Parameterraum-Exploration")
+print("=" * 90)
+
+print("\n--- Cross-Korrelation: Template-Laenge ---")
+print(
+    f"{'Konfig':>20} {'Det. Rate':>10} {'Loc. Err (ms)':>14} {'Peak R_xh':>10} {'FP':>4}"
+)
+print("-" * 65)
+for r in results_tmpl:
+    bl = " <-" if r["duration_s"] == 0.5 else ""
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{'T=' + str(r['duration_s']) + ' s':>20} {r['detection_rate']:>10.0%} "
+        f"{err_str:>14} {rxh_str:>10} {r['n_fp']:>4d}{bl}"
+    )
+
+print("\n--- Auto-Korrelation: Lag-Bereich ---")
+print(f"{'Konfig':>20} {'T_det (ms)':>11} {'LPE (ms)':>9} {'Peak R_xx':>10}")
+print("-" * 55)
+for r in results_lag:
+    bl = " <-" if r["max_lag_config"] == 750 else ""
+    det_str = (
+        f"{r['detected_period_s']*1000:.1f}"
+        if not np.isnan(r["detected_period_s"])
+        else "---"
+    )
+    lpe_str = f"{r['lpe_ms']:.1f}" if not np.isnan(r["lpe_ms"]) else "---"
+    h_str = f"{r['peak_height']:.4f}" if not np.isnan(r["peak_height"]) else "---"
+    print(
+        f"{'Lag=' + str(r['max_lag_config']):>20} {det_str:>11} "
+        f"{lpe_str:>9} {h_str:>10}{bl}"
+    )
+
+print("\n--- Auto-Korrelation: Normalisierung ---")
+print(f"{'Konfig':>20} {'T_det (ms)':>11} {'LPE (ms)':>9} {'Peak R_xx':>10}")
+print("-" * 55)
+for name in ["biased", "unbiased"]:
+    r = norm_results[name]
+    bl = " <-" if name == "biased" else ""
+    print(
+        f"{name:>20} {r['T_det']*1000:>11.1f} {r['LPE']:>9.1f} {r['peak_h']:>10.4f}{bl}"
+    )
+
+print("\n<- = Baseline")
+
+print("\n" + "=" * 90)
+print("ZUSAMMENFASSUNG: Robustheitsanalyse (CCF)")
+print("=" * 90)
+
+print("\n--- Additives Rauschen ---")
+print(
+    f"{'SNR':>10} {'Det. Rate':>10} {'Loc. Err (ms)':>14} {'Peak R_xh':>10} {'FP':>4}"
+)
+print("-" * 55)
+for r in results_snr:
+    snr_str = "inf (BL)" if np.isinf(r["snr_db"]) else f"{r['snr_db']:.0f} dB"
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{snr_str:>10} {r['detection_rate']:>10.0%} {err_str:>14} "
+        f"{rxh_str:>10} {r['n_fp']:>4d}"
+    )
+
+print("\n--- Break-Amplitudenvariation ---")
+print(
+    f"{'Skala':>10} {'Det. Rate':>10} {'Loc. Err (ms)':>14} {'Peak R_xh':>10} {'FP':>4}"
+)
+print("-" * 55)
+for r in results_amp:
+    scale_str = f"{r['break_scale']:.0%}" + (" (BL)" if r["break_scale"] == 1.0 else "")
+    err_str = (
+        f"{r['mean_loc_error_ms']:.1f}"
+        if not np.isnan(r["mean_loc_error_ms"])
+        else "---"
+    )
+    rxh_str = f"{r['mean_peak_rxh']:.4f}" if not np.isnan(r["mean_peak_rxh"]) else "---"
+    print(
+        f"{scale_str:>10} {r['detection_rate']:>10.0%} {err_str:>14} "
+        f"{rxh_str:>10} {r['n_fp']:>4d}"
+    )
+```
+
+**Beobachtungen:**
+
+- **Template-Laenge (CCF):** Alle Template-Laengen erreichen 100% Detection Rate. Das kuerzeste Template (0.2 s, 20 Samples) erzeugt 1 False Positive und zeigt die niedrigste Peak-Korrelation (R = 0.97). Templates ab 0.5 s liefern 0 FP. Die Peak-Korrelation sinkt leicht mit zunehmender Laenge (0.9977 bei 0.5 s vs. 0.9962 bei 1.5 s), da laengere Templates mehr umliegenden Kontext einschliessen, der nicht exakt zum Break passt.
+- **Lag-Bereich (ACF):** Alle drei Konfigurationen (250, 500, 750 Samples) liefern identische Ergebnisse (T_det = 330.0 ms, LPE = 3.3 ms, Peak R_xx = 0.78). Der effektive Max-Lag ist durch die Laenge des Steady-State-Segments begrenzt (110 Samples = 1.1 s), sodass die Konfiguration keinen Einfluss auf die Schrittperiodendetektion hat.
+- **Normalisierung (ACF):** Biased und unbiased liefern identische Lag Precision (LPE = 3.3 ms). Die unbiased-Normalisierung erhoht die Peak-Hoehe (0.92 vs. 0.78), da die Kompensation fuer abnehmende Ueberlappung die relativen Peak-Werte anhebt.
+- **Rauschen (CCF):** Bei SNR = 20 dB bleibt die Detektion vollstaendig (100%, R = 0.92). Bei SNR = 10 dB und 5 dB faellt die Detection Rate auf 0%, da die Peak-Korrelation unter den Schwellwert von 0.9 sinkt. Die Pearson-Normalisierung kompensiert globale Amplitudenaenderungen, aber nicht lokale Signalverzerrung durch starkes Rauschen.
+- **Break-Amplitude (CCF):** Alle drei Skalierungen (50%, 100%, 150%) erreichen 100% Detection Rate. Bei halbierter Break-Tiefe (1.8 yd/s) entsteht ein Lokalisierungsfehler von 5.0 ms und eine leicht reduzierte Konfidenz (R = 0.97). Erhoehte Break-Tiefe (150%) liefert stabile Detektion mit R = 0.99.
+
+---## Tag 10 -- Analyse & Kommunikation
+
+### BeobachtungenDie ACF detektiert die Schrittperiode mit LPE = 3.3 ms (T_det = 330.0 ms vs. 333.3 ms erwartet, < 1% Fehler) und die Routenstruktur bei ~4.5 s Lag. Die Schrittperiodizitaet ist nur im isolierten Steady-State-Segment sichtbar, nicht im Vollsignal. Die CCF lokalisiert beide HITCH-Breaks (t = 2.5 s, 11.5 s) mit 0.0 ms Fehler und R = 0.998. Templates ab 0.5 s eliminieren False Positives vollstaendig. Die Robustheitsanalyse zeigt eine abrupte SNR-Schwelle: Bei 20 dB bleibt die Detektion stabil (R = 0.92), bei 10 dB faellt sie auf 0%. Amplitudenvariationen (50-150%) beeintraechtigen die Detektion nicht.### InterpretationDie hohe ACF-Praezision bestaetigt, dass Korrelation die Schrittfrequenz eines WR zuverlaessig quantifizieren kann -- relevant fuer Ermuedungsmonitoring im NFL-Scouting. Dass Steady-State-Isolation noetig war, zeigt eine zentrale Limitation: Die ACF setzt Stationaritaet voraus, die bei Routensignalen mit transienten Phasen nicht gegeben ist. Die CCF-Schwellwertanpassung von 0.5 (Plan) auf 0.9 (Implementierung) war essenziell, da Routenuebergaenge bei niedrigem Schwellwert False Positives erzeugten (R = 0.78-0.83). Theoretische Parameterwahl bedarf iterativer, datengetriebener Verfeinerung.### DiskussionDie SNR-Schwelle zwischen 20 und 10 dB ist die kritischste Erkenntnis. NFL-Trackingdaten (Zebra-RFID, typisch 15-25 dB) ermoeglichen Break-Detektion, aber lokale Stoerungen koennen das SNR punktuell unter die Schwelle druecken. Die Robustheit gegenueber Amplitudenvariation ist positiv: Unterschiedlich intensive Routenabbrueche werden zuverlaessig erkannt. Die Anwendung von Korrelation auf nicht-stationaere Signale erfordert domainspezifische Kalibrierung -- Steady-State-Isolation (ACF) und Schwellwerterhoehung (CCF) -- die ueber die theoretische Methodenwahl hinausgeht.
+
+# Quellenverzeichnis
+
+[1] Kaggle, "NFL Big Data Bowl 2026 - Analytics," 2026. [Online]. Verfügbar: https://www.kaggle.com/competitions/nfl-big-data-bowl-2026-analytics/overview. [Zugriff am: 9. März 2026].
+
+[2] C. Hanon und B. Gajer, "Velocity and Stride Parameters of World-Class 400-Meter Athletes Compared With Less Experienced Runners," *Journal of Strength and Conditioning Research*, INSEP, 2004. [Online]. Verfügbar: https://insep.hal.science/hal-01623755v1/document
+

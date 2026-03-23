@@ -1,0 +1,511 @@
+---
+title: GBSV MC1 -- Faltung und Entfaltung
+author: Luca Manna
+date: '2026-03-23'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Faltung und Entfaltung
+
+## Tag 11 -- Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+Im Bereich der NFL-Leistungsanalyse werden Beschleunigungssignale von Quarterbacks (QBs) während der Pre-Snap- und Pocket-Phase erfasst, um Bewegungsmuster in der Pocket zu analysieren. Die Daten stammen von RFID-Tracking-Chips (Zebra Technologies) in den Schulterpolstern, die Positionen mit 10 Hz aufzeichnen, woraus Beschleunigungswerte abgeleitet werden. Beschleunigungspeaks markieren kritische Spielmomente: Wurfauslösungen erzeugen scharfe, kurze Peaks (Dauer ~50-100 ms, Amplitude bis 8 yd/s$^2$), Richtungswechsel in der Pocket produzieren moderate Peaks (~3-4 yd/s$^2$), und die Basis-Pocket-Bewegung erzeugt eine langsame Variation (~1-2 yd/s$^2$). Die Sensordaten enthalten jedoch Messrauschen, das die automatische Erkennung dieser Events erschwert. Dieser Anwendungsfall ist relevant für die USA, da die NFL mit Next Gen Stats das umfangreichste Spieler-Tracking-Programm im Profisport betreibt und die Pocket-Analyse ein zentrales Thema der QB-Bewertung ist: Teams nutzen Beschleunigungsprofile, um Pocket Presence, Escapability und Throw Mechanics zu quantifizieren.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der Anwendung von Faltung (Convolution) und Entfaltung (Deconvolution) auf das Beschleunigungssignal eines NFL Quarterbacks während der Pocket-Phase. Das Rohsignal enthält Messrauschen aus dem RFID-Tracking, das die Erkennung von Beschleunigungsereignissen (Wurfauslösung, Richtungswechsel) erschwert. Faltung mit einem Glättungskern kann dieses Rauschen reduzieren und die grundlegenden Bewegungsmuster sichtbar machen. Dabei entsteht jedoch ein fundamentaler Zielkonflikt: Glättung verwischt gleichzeitig die scharfen Beschleunigungspeaks, die analytisch am wertvollsten sind, da sie Wurfzeitpunkte und Richtungswechsel markieren. Entfaltung als inverse Operation der Faltung könnte diese verlorenen scharfen Features aus dem geglätteten Signal wiederherstellen. Entfaltung ist jedoch ein schlecht gestelltes inverses Problem (ill-posed), bei dem Rauschen verstärkt werden kann. Die zentrale Frage lautet: Wie lässt sich die Balance zwischen Rauschunterdrückung und Feature-Erhaltung optimieren, und inwieweit kann Entfaltung die durch Glättung verlorene Signalstruktur wiederherstellen?
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Das Ziel ist zu untersuchen, wie Faltung mit verschiedenen Glättungskernen die Balance zwischen Rauschunterdrückung und Erhaltung scharfer Beschleunigungsereignisse im QB-Pocket-Signal beeinflusst, und ob Entfaltung die durch Glättung verlorenen Features rekonstruieren kann. Dabei soll bestimmt werden, unter welchen Bedingungen Entfaltung stabil arbeitet und ab wann Rauschverstärkung die Rekonstruktion unbrauchbar macht.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Die Signalparameter basieren auf den realen Beschleunigungsprofilen von Patrick Mahomes (QB, Kansas City Chiefs, Week 12, Saison 2023: LV Raiders @ KC Chiefs), erfasst durch RFID-Tracking-Chips (Zebra Technologies) mit 10 Hz im Rahmen des NFL Big Data Bowl 2026 (Kaggle/NFL Next Gen Stats). Die realen Daten umfassen 19 Pre-Snap-Plays mit 604 Frames und zeigen Beschleunigungswerte von 0 bis 8.19 yd/s$^2$ (Mittelwert: 2.0 yd/s$^2$, mittlerer Peak pro Play: 3.95 yd/s$^2$).
+
+Für die Faltungsanalyse wird ein synthetisches QB-Pocket-Beschleunigungsmodell bei 500 Hz konstruiert, dessen Parameter quantitativ aus den realen Mahomes-Daten abgeleitet werden. Das Modell enthält drei Komponenten:
+
+1. **Basis-Pocket-Bewegung:** Langsame Variation (~0.8 Hz) mit Amplitude ~0.6 yd/s$^2$ um einen Mittelwert von ~1.8 yd/s$^2$, modelliert die rhythmischen Gewichtsverlagerungen des QBs in der Pocket.
+2. **Scharfe Beschleunigungsereignisse:** 3 Gauß-Peaks unterschiedlicher Amplitude und Breite, die Richtungswechsel (moderate Peaks) und die Wurfauslösung (schärfster Peak) repräsentieren.
+3. **Messrauschen:** Additives Gaußsches Rauschen ($\sigma$ = 0.35 yd/s$^2$), das die Sensor-Ungenauigkeit des RFID-Trackings simuliert.
+
+Die höhere Sampling Rate (500 Hz vs. 10 Hz NFL-Standard) ermöglicht die vollständige Darstellung der scharfen Transienten. Das synthetische Modell liefert eine bekannte Ground Truth für die quantitative Evaluation der Faltungs- und Entfaltungsergebnisse.
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# --- Reale Daten: Parameterherleitung ---
+df = pd.read_csv("../data/train/input_2023_w12.csv")
+mahomes = df[df["player_name"] == "Patrick Mahomes"].copy()
+mahomes["time_s"] = (mahomes["frame_id"] - 1) * 0.1
+
+# Quantitative Parameterherleitung
+play_stats = (
+    mahomes.groupby("play_id")
+    .agg(
+        a_max=("a", "max"),
+        a_mean=("a", "mean"),
+        s_max=("s", "max"),
+        n_frames=("frame_id", "count"),
+    )
+    .reset_index()
+)
+play_stats["duration_s"] = (play_stats["n_frames"] - 1) * 0.1
+
+print("Parameterherleitung aus realen Mahomes-Daten (Week 12, LV @ KC, 19 Plays)")
+print("=" * 70)
+print(f"  Plays: {len(play_stats)}")
+print(
+    f"  Frames/Play: {play_stats['n_frames'].mean():.1f} +/- {play_stats['n_frames'].std():.1f}"
+)
+print(
+    f"  Dauer/Play:  {play_stats['duration_s'].mean():.1f} +/- {play_stats['duration_s'].std():.1f} s"
+)
+print(
+    f"  a_max/Play:  {play_stats['a_max'].mean():.2f} +/- {play_stats['a_max'].std():.2f} yd/s^2"
+)
+print(
+    f"  a_mean/Play: {play_stats['a_mean'].mean():.2f} +/- {play_stats['a_mean'].std():.2f} yd/s^2"
+)
+print(
+    f"  Gesamt a:    min={mahomes['a'].min():.2f}, max={mahomes['a'].max():.2f} yd/s^2"
+)
+print(f"\n-> Modellparameter:")
+print(
+    f"   A_BASE = 1.8 yd/s^2 (Median {mahomes['a'].median():.2f}, Basis-Pocket-Bewegung)"
+)
+print(f"   Peak-Events: 3.0, 2.5, 5.5 yd/s^2 (abgeleitet aus a_max-Verteilung)")
+print(f"   NOISE_STD = 0.35 yd/s^2 (~18% von a_mean)")
+```
+
+```{python}
+# Visualisierung: Reale Mahomes-Beschleunigungsprofile
+fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+
+# Links: Alle Plays overlay
+ax = axes[0]
+for pid in sorted(mahomes["play_id"].unique()):
+    play = mahomes[mahomes["play_id"] == pid]
+    a_max = play["a"].max()
+    color = "#d62728" if a_max > 5 else ("#ff7f0e" if a_max > 3.5 else "#1f77b4")
+    alpha = 0.9 if a_max > 5 else 0.6
+    ax.plot(play["time_s"], play["a"], color=color, alpha=alpha, linewidth=0.9)
+
+ax.axhline(
+    mahomes["a"].mean(),
+    color="gray",
+    linestyle="--",
+    linewidth=0.8,
+    label=f"$\\bar{{a}}$ = {mahomes['a'].mean():.2f} yd/s$^2$",
+)
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Beschleunigung (yd/s$^2$)")
+ax.set_title("Reale Daten: Mahomes, Week 12 (19 Plays)")
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+
+# Legende manuell
+from matplotlib.lines import Line2D
+
+legend_lines = [
+    Line2D([0], [0], color="#d62728", linewidth=1.5, label="a_max > 5 yd/s$^2$"),
+    Line2D([0], [0], color="#ff7f0e", linewidth=1.5, label="a_max 3.5-5 yd/s$^2$"),
+    Line2D([0], [0], color="#1f77b4", linewidth=1.5, label="a_max < 3.5 yd/s$^2$"),
+]
+ax.legend(handles=legend_lines, fontsize=7, loc="upper right", title="Peak-Kategorie")
+
+# Rechts: Histogramm der Beschleunigungswerte
+ax = axes[1]
+ax.hist(mahomes["a"], bins=40, color="steelblue", alpha=0.7, edgecolor="white")
+ax.axvline(
+    mahomes["a"].median(),
+    color="red",
+    linewidth=1.5,
+    linestyle="--",
+    label=f"Median = {mahomes['a'].median():.2f} yd/s$^2$",
+)
+ax.axvline(
+    play_stats["a_max"].mean(),
+    color="darkorange",
+    linewidth=1.5,
+    linestyle=":",
+    label=f"$\\bar{{a}}_{{max}}$ = {play_stats['a_max'].mean():.2f} yd/s$^2$",
+)
+ax.set_xlabel("Beschleunigung (yd/s$^2$)")
+ax.set_ylabel("Anzahl Frames")
+ax.set_title("Beschleunigungsverteilung (604 Frames)")
+ax.legend(fontsize=8)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# --- Synthetisches QB-Pocket-Beschleunigungsmodell ---
+FS_REF = 500  # Referenz-Sampling-Rate (Hz)
+T_TOTAL = 3.5  # Gesamtdauer (s), abgeleitet aus mittlerer Play-Dauer (3.1 s)
+A_BASE = 1.8  # Basis-Beschleunigung (yd/s^2), aus Median der realen Daten
+F_DRIFT = 0.8  # Pocket-Drift-Frequenz (Hz), langsame Gewichtsverlagerung
+A_DRIFT = 0.6  # Drift-Amplitude (yd/s^2)
+NOISE_STD = 0.35  # Messrauschen (yd/s^2), ~18% von a_mean
+
+# Scharfe Beschleunigungsereignisse (Gauß-Peaks)
+EVENTS = [
+    {"t": 0.9, "amplitude": 3.0, "width": 0.06, "label": "Richtungswechsel 1"},
+    {"t": 1.9, "amplitude": 2.5, "width": 0.08, "label": "Step-up"},
+    {"t": 2.8, "amplitude": 5.5, "width": 0.04, "label": "Wurfausloesung"},
+]
+
+t = np.arange(0, T_TOTAL, 1 / FS_REF)
+
+# Komponente 1: Basis-Pocket-Drift (langsame Oszillation)
+a_drift = A_BASE + A_DRIFT * np.sin(2 * np.pi * F_DRIFT * t)
+
+# Komponente 2: Scharfe Beschleunigungsereignisse
+a_events = np.zeros_like(t)
+for ev in EVENTS:
+    a_events += ev["amplitude"] * np.exp(-(((t - ev["t"]) / ev["width"]) ** 2))
+
+# Ground Truth: sauberes Signal (nicht-negativ)
+a_clean = np.maximum(a_drift + a_events, 0)
+
+# Verrauschtes Signal (simuliert RFID-Messung)
+np.random.seed(42)
+a_noisy = np.maximum(a_clean + np.random.normal(0, NOISE_STD, len(t)), 0)
+
+print(f"Synthetisches Modell: {len(t)} Samples bei {FS_REF} Hz, Dauer: {T_TOTAL} s")
+print(f"Ground Truth:  min={a_clean.min():.2f}, max={a_clean.max():.2f} yd/s^2")
+print(f"Verrauscht:    min={a_noisy.min():.2f}, max={a_noisy.max():.2f} yd/s^2")
+print(
+    f"SNR (Ground Truth vs. Rauschen): {10 * np.log10(np.var(a_clean) / NOISE_STD**2):.1f} dB"
+)
+```
+
+```{python}
+# === Visualisierung: Synthetisches Modell ===
+fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+
+# Oben: Ground Truth (sauberes Signal)
+ax = axes[0]
+ax.plot(t, a_clean, color="C0", linewidth=0.8)
+for ev in EVENTS:
+    idx = np.argmin(np.abs(t - ev["t"]))
+    ax.annotate(
+        ev["label"],
+        xy=(ev["t"], a_clean[idx]),
+        xytext=(ev["t"] + 0.15, a_clean[idx] + 0.5),
+        fontsize=8,
+        color="red",
+        arrowprops=dict(arrowstyle="->", color="red", lw=1),
+    )
+ax.set_ylabel("Beschleunigung\n(yd/s$^2$)")
+ax.set_title(f"Ground Truth | Synthetisches QB-Pocket-Modell ($f_s$ = {FS_REF} Hz)")
+ax.grid(True, alpha=0.3)
+
+# Mitte: Verrauschtes Signal
+ax = axes[1]
+ax.plot(t, a_noisy, color="C1", linewidth=0.4, alpha=0.8)
+ax.plot(t, a_clean, color="C0", linewidth=1.2, alpha=0.5, label="Ground Truth")
+ax.set_ylabel("Beschleunigung\n(yd/s$^2$)")
+ax.set_title(f"Verrauschtes Signal ($\\sigma$ = {NOISE_STD} yd/s$^2$)")
+ax.legend(fontsize=8, loc="upper right")
+ax.grid(True, alpha=0.3)
+
+# Unten: Zoom auf Wurfauslösung (schärfster Peak)
+ax = axes[2]
+t_zoom = (2.4, 3.2)
+mask = (t >= t_zoom[0]) & (t <= t_zoom[1])
+ax.plot(
+    t[mask], a_noisy[mask], color="C1", linewidth=0.6, alpha=0.8, label="Verrauscht"
+)
+ax.plot(t[mask], a_clean[mask], color="C0", linewidth=1.5, label="Ground Truth")
+ax.fill_between(
+    t[mask],
+    a_clean[mask] - NOISE_STD,
+    a_clean[mask] + NOISE_STD,
+    alpha=0.15,
+    color="C0",
+    label=f"$\\pm\\sigma$ = {NOISE_STD} yd/s$^2$",
+)
+ax.set_xlabel("Zeit (s)")
+ax.set_ylabel("Beschleunigung\n(yd/s$^2$)")
+ax.set_title("Zoom | Wurfausloesung (t = 2.8 s)")
+ax.legend(fontsize=8, loc="upper right")
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Die realen Mahomes-Daten zeigen eine rechtsschiefe Beschleunigungsverteilung mit einem Median von 1.86 yd/s$^2$ und vereinzelten Peaks bis 8.19 yd/s$^2$. Plays mit hohen Spitzenbeschleunigungen (rot, > 5 yd/s$^2$) zeigen ausgeprägte transiente Events, während die Mehrheit der Plays (blau) moderate, gleichmässige Beschleunigungsprofile aufweist. Das synthetische Modell bildet diese Struktur ab: Die Basis-Pocket-Drift bei 1.8 yd/s$^2$ entspricht dem Median der realen Daten, die drei Events (3.0, 2.5 und 5.5 yd/s$^2$) repräsentieren die Bandbreite von moderaten bis starken Beschleunigungsereignissen. Der Zoom auf die Wurfauslösung (t = 2.8 s) zeigt deutlich die Problemstellung: Das Rauschen ($\sigma$ = 0.35 yd/s$^2$) überlagert die scharfen Features, deren Breite (40-80 ms) nur wenige Samples bei 10 Hz umfassen würde. Bei 500 Hz sind diese Transienten vollständig aufgelöst und bieten eine geeignete Ground Truth für die Evaluation der Faltungs- und Entfaltungseffekte.
+
+### Signalcharakteristik und Begründung für Faltung und Entfaltung
+
+Das synthetische Beschleunigungssignal enthält zwei Informationsebenen, die sich in ihrer Frequenzcharakteristik unterscheiden:
+
+1. **Niederfrequente Pocket-Drift (~0.8 Hz):** Langsame Gewichtsverlagerungen in der Pocket. Diese Komponente wird durch Glättung nicht beeinträchtigt und ist robust gegenüber moderater Filterung.
+
+2. **Hochfrequente Transienten (breitbandig):** Scharfe Beschleunigungspeaks (Wurfauslösung, Richtungswechsel) mit Breiten von 40-80 ms. Diese Peaks haben ein breites Frequenzspektrum und werden durch Glättung abgeflacht und verbreitert.
+
+3. **Messrauschen (breitbandig, unkorreliert):** Additives Gaußsches Rauschen aus dem RFID-Tracking-System, gleichmässig über das gesamte Frequenzspektrum verteilt.
+
+**Begründung für Faltung als lineares Systemmodell:**
+Faltung modelliert das Filtern als lineares, zeitinvariantes (LTI) System: Der Glättungskern definiert die Impulsantwort, und das gefilterte Signal ist die Faltung des Eingangssignals mit diesem Kern. Dieser Rahmen erlaubt:
+- Kontrollierbare Glättung über Kerntyp und -grösse
+- Vorhersagbares Verhalten im Frequenzbereich (Transferfunktion)
+- Theoretische Umkehrbarkeit durch Entfaltung
+
+**Begründung für Entfaltung als relevante inverse Operation:**
+Wenn der Glättungskern bekannt ist, kann Entfaltung versuchen, das Originalsignal aus dem gefilterten Signal zu rekonstruieren. Im NFL-Kontext wäre dies relevant, wenn ein Team verrauschte Daten zunächst glättet (z.B. für Pocket-Trajektorie-Visualisierung), aber anschliessend die exakten Event-Zeitpunkte aus den geglätteten Daten zurückgewinnen möchte (z.B. für Throw-Timing-Analyse). Entfaltung ist ein schlecht gestelltes inverses Problem: Division im Frequenzbereich verstärkt Rauschen bei Frequenzen, wo der Kern kleine Werte hat. Regularisierung (z.B. Wiener-Filterung) ist daher notwendig.
+
+**Vergleich mit alternativen Methoden:**
+- **Median-Filter:** Nicht-linear, gut für Ausreisser-Unterdrückung, aber kein LTI-System. Entfaltung ist nicht anwendbar, da keine definierte Impulsantwort existiert.
+- **Frequenzdomänen-Filter (FFT-basiert):** Effektiv für stationäre Signale, aber das QB-Beschleunigungssignal ist nicht-stationär (transiente Events zu unterschiedlichen Zeitpunkten). Ein globaler Frequenzfilter kann Transienten nicht zeitlich selektiv behandeln.
+- **Wavelet-Denoising:** Leistungsfähig für nicht-stationäre Signale, setzt aber Sparsity in der Wavelet-Domäne voraus und ist für die gegebene Aufgabe (einfache Glättung + Entfaltung als LTI-Demonstration) überdimensioniert.
+
+Faltung und Entfaltung bilden ein konsistentes lineares Framework, das sowohl die Vorwärts-Operation (Glättung) als auch die Rückwärts-Operation (Rekonstruktion) in einem einheitlichen mathematischen Rahmen analysierbar macht.
+
+**Einschränkungen:**
+- Das synthetische Modell nimmt additives, unkorreliertes Gaußsches Rauschen an. Reale RFID-Messfehler könnten korreliert oder nicht-gaußisch sein.
+- Die NFL-Beschleunigung ist als Betrag angegeben (nicht-negativ), was die Linearitätsannahme der Faltung bei Werten nahe 0 verletzen kann.
+- Die Modell-Events haben exakte Gauß-Form; reale Beschleunigungspeaks können asymmetrisch sein.
+
+```{python}
+# Vorschau: Visueller Effekt eines einfachen Glättungskerns
+kernel_sizes = [5, 25, 75]
+
+fig, axes = plt.subplots(
+    len(kernel_sizes), 1, figsize=(14, 8), sharex=True, sharey=True
+)
+
+for ax, k_size in zip(axes, kernel_sizes):
+    kernel = np.ones(k_size) / k_size
+    a_smoothed = np.convolve(a_noisy, kernel, mode="same")
+
+    ax.plot(t, a_clean, color="C0", linewidth=1.0, alpha=0.4, label="Ground Truth")
+    ax.plot(
+        t,
+        a_smoothed,
+        color="C2",
+        linewidth=1.2,
+        label=f"Geglättet (Moving Average, N={k_size})",
+    )
+
+    duration_ms = k_size / FS_REF * 1000
+    ax.set_ylabel("a (yd/s$^2$)")
+    ax.set_title(f"Moving Average | N = {k_size} ({duration_ms:.0f} ms)")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+axes[-1].set_xlabel("Zeit (s)")
+fig.suptitle(
+    "Vorschau | Glättungseffekt auf verrauschtes QB-Beschleunigungssignal",
+    fontsize=13,
+    y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen zur Vorschau:**
+
+Die Vorschau illustriert den zentralen Zielkonflikt: Ein kurzer Kern (N=5, 10 ms) reduziert Rauschen minimal, erhält aber alle scharfen Peaks. Ein mittlerer Kern (N=25, 50 ms) glättet das Rauschen deutlich, beginnt aber die schmalsten Peaks (Wurfauslösung bei t = 2.8 s, Breite = 40 ms) abzuflachen. Ein langer Kern (N=75, 150 ms) entfernt praktisch alles Rauschen, flacht aber alle drei Events massiv ab und verschiebt sie zeitlich. Dieser Trade-off zwischen Rauschunterdrückung und Feature-Erhaltung bildet den Kern der nachfolgenden Untersuchung.
+
+## Tag 12 -- Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet die Prinzipien der **Faltung** (Convolution) und **Entfaltung** (Deconvolution) als komplementäre Operationen eines linearen, zeitinvarianten (LTI) Systems auf das QB-Pocket-Beschleunigungssignal an.
+
+**Faltung** modelliert die Filterung als lineare Operation. Das gefilterte Signal $y[n]$ ist die diskrete Faltung des Eingangssignals $x[n]$ mit dem Kern $h[n]$:
+
+$$y[n] = (x * h)[n] = \sum_{k=0}^{M-1} h[k] \cdot x[n-k]$$
+
+wobei $M$ die Kernlänge ist. Im Frequenzbereich wird die Faltung zur Multiplikation: $Y(f) = X(f) \cdot H(f)$. Der Kern $h[n]$ definiert die Impulsantwort des Filters und bestimmt, welche Frequenzanteile gedämpft oder erhalten werden. Für unser Signal bedeutet das: Ein Tiefpass-Kern unterdrückt das hochfrequente Rauschen, dämpft aber auch die breitbandigen Transienten (Wurfauslösung, Richtungswechsel).
+
+**Entfaltung** ist die inverse Operation: Gegeben das gefilterte Signal $y[n]$ und den bekannten Kern $h[n]$, soll das Originalsignal $x[n]$ rekonstruiert werden. Im Frequenzbereich entspricht dies einer Division:
+
+$$\hat{X}(f) = \frac{Y(f)}{H(f)}$$
+
+Diese naive Inversion ist jedoch ein **schlecht gestelltes Problem** (ill-posed): An Frequenzen, wo $|H(f)| \approx 0$ (d.h. der Kern diese Frequenzen stark dämpft), wird der Quotient instabil und verstärkt jedes vorhandene Rauschen massiv. Regularisierung ist daher notwendig, um eine stabile Rekonstruktion zu erzielen.
+
+### Kernel-Auswahl und Begründung
+
+Für die Glättung des QB-Beschleunigungssignals werden zwei Kerntypen ausgewählt und verglichen:
+
+**1. Moving Average (Boxcar-Kern)**
+
+$$h_{MA}[k] = \frac{1}{N}, \quad k = 0, 1, \ldots, N-1$$
+
+Der Moving Average gewichtet alle $N$ Samples im Fenster gleich. Seine Transferfunktion im Frequenzbereich hat die Form einer Sinc-Funktion ($\sin(\pi f N) / (N \sin(\pi f))$) mit Nullstellen bei $f = k/N$ und Nebenkeulen (Sidelobes), die zu unerwünschten Schwingungen im gefilterten Signal führen können (Gibbs-Phänomen). Der einzige Parameter ist die Kernlänge $N$.
+
+- *Vorteile:* Einfach, intuitiv interpretierbar (gleitendes Mittel über $N/f_s$ Sekunden), keine Parameteroptimierung nötig
+- *Nachteile:* Unstetige Impulsantwort, Sidelobes im Frequenzbereich, kein monoton fallender Frequenzgang
+
+**2. Gaußscher Kern**
+
+$$h_G[k] = \frac{1}{\sqrt{2\pi}\sigma_s} \exp\left(-\frac{(k - \lfloor N/2 \rfloor)^2}{2\sigma_s^2}\right), \quad k = 0, 1, \ldots, N-1$$
+
+wobei $\sigma_s$ die Standardabweichung in Samples ist ($\sigma_s = \sigma_t \cdot f_s$, mit $\sigma_t$ in Sekunden) und $N = 6\sigma_s + 1$ gewählt wird, um 99.7% der Kernmasse einzuschliessen. Die Fourier-Transformierte eines Gaußkerns ist ebenfalls gaußförmig, was einen monoton fallenden Frequenzgang ohne Nebenkeulen garantiert.
+
+- *Vorteile:* Glatter Frequenzgang ohne Sidelobes, monoton fallende Dämpfung, theoretisch optimale Impulsantwort für Gaußsches Rauschen [2]
+- *Nachteile:* Breiterer Übergangsbereich als ideale Tiefpassfilter, zwei verkoppelte Parameter ($\sigma_t$, $N$)
+
+**Begründung der Auswahl:**
+Beide Kerne werden implementiert und verglichen. Der **Gaußsche Kern dient als primärer Kern**, da er für unser Signal mit Gaußschem Rauschen ($\sigma$ = 0.35 yd/s$^2$) theoretisch die optimale Glättung liefert und die Sidelobe-Artefakte des Moving Average vermeidet. Der Moving Average dient als einfacherer Vergleichskern, um den Einfluss der Kernform auf die Filterleistung zu quantifizieren. Diese Gegenüberstellung ermöglicht eine strukturierte Bewertung, ob die zusätzliche Komplexität des Gaußkerns einen messbaren Vorteil für unser spezifisches Signal bringt.
+
+### Entfaltungsmethoden: Vergleich und Auswahl
+
+Drei Entfaltungsansätze für 1D-Signale werden verglichen:
+
+**1. Naive inverse Filterung**
+
+$$\hat{X}(f) = \frac{Y(f)}{H(f)}$$
+
+Direkte Division im Frequenzbereich. Theoretisch exakt bei rauschfreien Signalen, aber in der Praxis unbrauchbar: An Frequenzen mit $|H(f)| \approx 0$ wird Rauschen um Faktoren von $1/|H(f)|$ verstärkt. Für den Moving Average mit Sinc-Transferfunktion existieren Nullstellen, an denen die Division divergiert. Für den Gaußkern geht $|H(f)| \to 0$ für $f \to \infty$, was hochfrequentes Rauschen exponentiell verstärkt.
+
+- *Ergebnis:* Instabil, nur als theoretischer Referenzfall relevant
+
+**2. Regularisierte inverse Filterung (Tikhonov)**
+
+$$\hat{X}(f) = \frac{Y(f) \cdot H^*(f)}{|H(f)|^2 + \lambda}$$
+
+Stabilisiert die Inversion durch einen Regularisierungsparameter $\lambda > 0$, der verhindert, dass der Nenner zu klein wird. Bei Frequenzen mit $|H(f)|^2 \gg \lambda$ verhält sich der Filter wie die naive Inversion; bei $|H(f)|^2 \ll \lambda$ wird die Verstärkung auf $\approx 1/\lambda$ begrenzt. Der Parameter $\lambda$ muss manuell gewählt werden und kontrolliert den Trade-off zwischen Rekonstruktionstreue und Rauschverstärkung.
+
+- *Ergebnis:* Stabil, aber $\lambda$ erfordert manuelle Abstimmung ohne klare optimale Wahl
+
+**3. Wiener-Filterung**
+
+$$\hat{X}(f) = \frac{Y(f) \cdot H^*(f)}{|H(f)|^2 + S_n(f) / S_x(f)}$$
+
+wobei $S_n(f)$ das Rauschleistungsspektrum und $S_x(f)$ das Signalleistungsspektrum ist. Der Wiener-Filter minimiert den mittleren quadratischen Fehler (MSE) zwischen dem rekonstruierten und dem wahren Signal [3]. Er ist formal äquivalent zur regularisierten Inversion, wobei $\lambda(f) = S_n(f)/S_x(f)$ frequenzabhängig aus den Signaleigenschaften bestimmt wird. Bei bekanntem Rauschpegel (wie in unserem synthetischen Modell) kann das Signal-zu-Rausch-Verhältnis (SNR) direkt verwendet werden.
+
+In der Praxis wird oft eine vereinfachte Form mit konstantem SNR-Schätzer $K$ verwendet:
+
+$$\hat{X}(f) = \frac{Y(f) \cdot H^*(f)}{|H(f)|^2 + 1/K}$$
+
+wobei $K = \text{Var}(x) / \sigma_n^2$ das geschätzte SNR ist.
+
+- *Ergebnis:* Optimal im MSE-Sinne, physikalisch motivierte Regularisierung, nutzt bekannte Rauschcharakteristik
+
+**Auswahl: Wiener-Filterung als primäre Entfaltungsmethode**
+
+Die Wiener-Filterung wird ausgewählt, weil:
+1. Sie den MSE minimiert, was für unseren Anwendungsfall (möglichst originalgetreue Rekonstruktion der Beschleunigungspeaks) direkt relevant ist
+2. Das Rauschen in unserem Modell bekannt ist ($\sigma_n$ = 0.35 yd/s$^2$, Gaußsch, additiv), was die optimale Parametrisierung ermöglicht
+3. Die Regularisierung physikalisch motiviert ist (SNR-basiert statt ad-hoc $\lambda$)
+4. Sie im Vergleich zur regularisierten Inversion frequenzabhängig regularisiert, was eine bessere Rekonstruktion bei Frequenzen mit hohem SNR ermöglicht
+
+**Erwartete Rekonstruktionsqualität:**
+Die Rekonstruktion wird nicht perfekt sein. Der Wiener-Filter bevorzugt Frequenzbereiche mit hohem SNR (niederfrequente Pocket-Drift) und dämpft Bereiche mit niedrigem SNR (hochfrequente Kanten der Peaks). Die scharfen Transienten (Breite 40-80 ms) werden teilweise, aber nicht vollständig wiederhergestellt. Im NFL-Kontext wäre die Rekonstruktion nützlich, wenn die Peak-Positionen (Zeitpunkte der Events) erhalten bleiben und die Peak-Amplituden auf $\pm$20% genau rekonstruiert werden, da dies für die zeitliche Lokalisierung der Wurfauslösung ausreichend ist.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+**Signalparameter (aus Tag 11):**
+
+| Parameter | Wert | Einheit | Herkunft |
+|:----------|:-----|:--------|:---------|
+| $f_s$ | 500 | Hz | Referenz-Sampling-Rate |
+| $T$ | 3.5 | s | Signaldauer (mittlere Play-Dauer) |
+| $N$ | 1750 | Samples | $T \cdot f_s$ |
+| $A_{base}$ | 1.8 | yd/s$^2$ | Basis-Beschleunigung (Median Mahomes) |
+| $\sigma_n$ | 0.35 | yd/s$^2$ | Messrauschen (~18% von $\bar{a}$) |
+
+**Gaußkern-Parameter (primärer Kern):**
+
+Die Glättungsbreite $\sigma_t$ bestimmt, welche zeitlichen Strukturen erhalten bleiben. Die schmalsten relevanten Features sind die Beschleunigungspeaks mit Breiten von 40-80 ms (vgl. Tag 11, EVENTS). Der Kern muss schmaler sein als diese Features, um sie nicht vollständig zu verwischen.
+
+- $\sigma_t$ = 10 ms (Baseline): $\sigma_s = \sigma_t \cdot f_s = 0.010 \cdot 500 = 5$ Samples, $N_{kern} = 6 \cdot 5 + 1 = 31$ Samples
+- Die Grenzfrequenz des Gaußkerns ($-3$ dB) liegt bei $f_{-3dB} = 1 / (2\pi\sigma_t) \approx 16$ Hz, was Rauschen oberhalb dieser Frequenz um mehr als die Hälfte dämpft, aber die Pocket-Drift (0.8 Hz) und den Grossteil der Peak-Energie ($< 15$ Hz) erhält
+
+**Moving-Average-Parameter (Vergleichskern):**
+
+- $N_{MA}$ = 25 Samples (Baseline), entspricht einer Fensterdauer von $25/500 = 50$ ms
+- Erste Nullstelle der Sinc-Transferfunktion bei $f_0 = f_s / N_{MA} = 500/25 = 20$ Hz
+
+**Wiener-Entfaltung:**
+
+- Rauschleistung: $\sigma_n^2 = 0.35^2 = 0.1225$ (yd/s$^2$)$^2$
+- Signalleistung: $\text{Var}(x_{clean})$ wird aus der Ground Truth geschätzt
+- SNR-Schätzer: $K = \text{Var}(x_{clean}) / \sigma_n^2$
+
+### Experimentelles Design für die nächsten Tage
+*Fokus: strukturierte Parametervariation und theoretische Vorhersage*
+
+**Baseline-Konfiguration (Tag 13):**
+- Faltung: Gaußkern mit $\sigma_t$ = 10 ms ($N$ = 31), angewendet auf das verrauschte Signal
+- Entfaltung: Wiener-Filter mit bekanntem SNR, angewendet auf das gefaltete Signal
+- Boundary Handling: Zero-Padding (symmetrisch)
+- Verifikation: Vergleich der manuellen Faltung mit `scipy.ndimage.convolve1d`
+
+**Parametervariation (Tag 14), systematisch variiert werden:**
+
+1. **Kerngrösse (Gaußkern):** $\sigma_t$ = 4, 10, 20, 40 ms ($N$ = 13, 31, 61, 121)
+   - Untersucht den Trade-off zwischen Rauschreduktion und Peak-Erhaltung
+   - Erwartung: Kleine $\sigma_t$ erhalten Peaks, aber wenig Rauschreduktion; grosse $\sigma_t$ starke Glättung, aber Peaks werden abgeflacht und verbreitert
+
+2. **Kerntyp:** Gaußkern vs. Moving Average (bei vergleichbarer effektiver Breite)
+   - Erwartung: Gaußkern liefert glattere Ergebnisse ohne Sidelobe-Artefakte; Moving Average zeigt Ringing-Effekte an scharfen Flanken
+
+3. **Wiener-Regularisierung:** SNR-Schätzer $K$ = 0.1$K_{true}$, $K_{true}$, 10$K_{true}$, 100$K_{true}$
+   - Untersucht die Sensitivität der Entfaltung gegenüber Fehlschätzung des SNR
+   - Erwartung: Zu niedriges $K$ (Überschätzung des Rauschens) ergibt überglättete Rekonstruktion; zu hohes $K$ (Unterschätzung) verstärkt Rauschen
+
+4. **Rauschpegel:** $\sigma_n$ = 0.10, 0.35, 0.70 yd/s$^2$
+   - Untersucht die Robustheit der gesamten Pipeline (Faltung + Entfaltung) unter verschiedenen SNR-Bedingungen
+   - Erwartung: Höheres Rauschen erschwert sowohl Glättung (mehr Rauschen zu entfernen) als auch Entfaltung (mehr Rauschverstärkung)
+
+**Erwartete Effekte zusammengefasst:**
+- Die Faltung erzeugt einen monotonen Trade-off: grössere Kerne reduzieren Rauschen stärker, verwischen aber Peaks proportional zur Kernbreite
+- Die Entfaltung zeigt einen nicht-monotonen Trade-off: zu wenig Regularisierung verstärkt Rauschen, zu viel Regularisierung ergibt ein dem gefilterten Signal ähnliches Resultat (die Entfaltung wird wirkungslos)
+- Es existiert ein optimaler Arbeitspunkt, an dem die Kombination aus Faltung und Entfaltung das beste Verhältnis zwischen Rauschunterdrückung und Feature-Erhaltung erreicht
+
+### Methodische Limitationen und Risikofaktoren
+*Fokus: Annahmen, Stabilität und potenzielle Fehlinterpretation*
+
+Die Wiener-Filterung setzt voraus, dass Signal und Rauschen stationäre Zufallsprozesse mit bekannten Leistungsspektren sind. Unser QB-Beschleunigungssignal ist jedoch nicht-stationär: Die scharfen Events (Wurfauslösung, Richtungswechsel) sind transiente, zeitlich lokalisierte Strukturen mit breitbandigem Spektrum. Der konstante SNR-Schätzer $K$ mittelt über das gesamte Signal und kann die lokale Situation an den Events (hohe Signalenergie, hohes lokales SNR) nicht abbilden. In der Praxis bedeutet dies, dass die Rekonstruktion in ruhigen Signalabschnitten (Basis-Drift) zu viel Rauschen verstärken könnte, während sie an den Peak-Positionen tendenziell zu konservativ regularisiert.
+
+Die Faltung mit endlichen Kernen erzeugt Randeffekte: Am Signalanfang und -ende stehen nicht genügend Datenpunkte zur Verfügung, um die volle Kernbreite auszunutzen. Die gewählte Zero-Padding-Strategie fügt Nullen hinzu, was zu einer systematischen Unterschätzung der Beschleunigung an den Rändern führt (Randverzerrung). Für unser Signal betrifft dies die ersten und letzten $\lfloor N/2 \rfloor$ Samples.
+
+Die Nicht-Negativitätsbedingung der NFL-Beschleunigung ($a \geq 0$) wird durch die Entfaltung nicht garantiert: Der Wiener-Filter ist ein linearer Operator und kann negative Werte produzieren, insbesondere an Stellen mit starken Flankenwechseln. In der Evaluation muss bewertet werden, ob und wo negative rekonstruierte Werte auftreten und ob ein nachträgliches Clipping ($\hat{x} = \max(\hat{x}, 0)$) die Rekonstruktionsqualität verbessert oder verschlechtert.
+
+## Tag 13 -- Implementierung
+
+*Wird an Tag 13 vervollständigt.*
+
+## Tag 14 -- Evaluation
+
+*Wird an Tag 14 vervollständigt.*
+
+## Tag 15 -- Analyse & Kommunikation
+
+*Wird an Tag 15 vervollständigt.*
+
+# Quellenverzeichnis
+
+[1] Kaggle, "NFL Big Data Bowl 2026 - Analytics," 2026. [Online]. Verfügbar: https://www.kaggle.com/competitions/nfl-big-data-bowl-2026-analytics/overview. [Zugriff am: 23. März 2026].
+
+[2] A. V. Oppenheim und R. W. Schafer, *Discrete-Time Signal Processing*, 3. Aufl., Pearson, 2009. Kapitel 2: Discrete-Time Signals and Systems (LTI-Systeme, Faltung).
+
+[3] R. C. Gonzalez und R. E. Woods, *Digital Image Processing*, 4. Aufl., Pearson, 2018. Kapitel 5.8: Wiener Filtering (Entfaltung mit Rauschunterdrückung).
+
