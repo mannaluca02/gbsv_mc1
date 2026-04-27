@@ -1,0 +1,125 @@
+---
+title: GBSV MC2 -- Augmentation
+author: Luca Manna
+date: '2026-04-27'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Augmentation
+
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 1 -- Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+SET ist ein US-amerikanisches Kartenspiel (1974 von Marsha Falco entwickelt, vertrieben durch Set Enterprises, Fountain Hills, Arizona). Eine Partie läuft visuell: 12 Karten liegen offen auf dem Tisch, alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über die vier Eigenschaften Menge, Farbe, Form und Füllung. Persönliche Motivation: Ich spiele SET regelmässig mit meiner Freundin und verliere dabei konstant. Diese MC soll als Grundbaustein für ein späteres Erkennungsmodell dienen, das aus einem Foto der Auslage automatisch das nächste gültige SET vorschlägt. Dieser Anwendungsfall ist relevant für die USA, da SET dort erfunden wurde, vertrieben wird und im schulischen wie privaten Umfeld breit verankert ist.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der robusten Erkennbarkeit von SET-Karten in Smartphone-Fotos einer realen Auslage. Reale Aufnahmen unterliegen photometrischen Störungen (Innenbeleuchtung in unterschiedlichen Farbtemperaturen, Glanzlicht auf der leicht glänzenden Kartenoberfläche, Schatten durch Hände, Sensorrauschen bei wenig Licht) und geometrischen Effekten durch Kamerawinkel und Tischneigung (perspektivische Verzerrung, Verkippung der Karten gegenüber der Bildebene, ungleichmässige Schärfe). Diese Bedingungen verändern die für die Klassifikation der vier Karteneigenschaften relevanten Bildmerkmale. Wird ein Erkennungspfad ausschliesslich auf einem sauberen Referenzbild getestet, bleibt unklar, gegenüber welchen realistischen Störungen er instabil wird. Augmentation erlaubt es, solche Störungen kontrolliert auf das Referenzbild anzuwenden, bevor in späteren Tasks Pattern Detection (Aufgabe 2) und Segmentation (Aufgabe 3) folgen.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Ziel ist zu untersuchen, wie stark realistische photometrische Aufnahmestörungen die Erkennbarkeit klassifikationsrelevanter Bildstrukturen beeinflussen und unter welchen Bedingungen die fragilste der vier Eigenschaften, die halb-Streifenfüllung, noch zuverlässig vom Original unterscheidbar bleibt.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in 3 x 4 Anordnung auf einer dunkelgrünen Spielmatte und repräsentiert eine zulässige Spielsituation gemäss Spielregeln [1]. Relevante Bildstrukturen sind: Kartenränder (rechteckig mit abgerundeten Ecken, hoher Kantenkontrast zum Untergrund), Symbole (Raute, Balken, Welle in 1-3 Exemplaren), Farbflächen (rot, violett, grün) und Füllungstexturen (leer, halb mit horizontalen Streifen, voll). Bereits im Originalbild sind leichte photometrische Effekte erkennbar (ungleichmässige Innenbeleuchtung, einzelne Glanzlichter, geringe perspektivische Verkippung), die als realistische Ausgangslage für die Augmentation dienen.
+
+```{python}
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img = np.array(Image.open(IMG_PATH))
+H, W = img.shape[:2]
+
+fig, ax = plt.subplots(figsize=(10, 7.5))
+ax.imshow(img)
+ax.set_title(
+    f"Referenzbild IMG_6947.JPG | {W} x {H} Pixel | 12 Karten in 3 x 4 Auslage"
+)
+ax.set_xlabel("x [Pixel]")
+ax.set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Auflösung: {W} x {H} Pixel | Kanäle: {img.shape[2]} | dtype: {img.dtype} | Werte: [{img.min()}, {img.max()}]"
+)
+```
+
+**Beobachtungen:**
+
+Die 12 Karten sind vollständig sichtbar und farblich klar gegen den dunkelgrünen Untergrund abgesetzt. Die Auslage ist nahezu frontal aufgenommen, zeigt aber eine sichtbare Verkippung gegenüber der Bildebene und ungleichmässige Helligkeit (oben dunkler als unten). Auf einzelnen Karten sind schwache Glanzlichter sichtbar. Damit liegt eine realistische Ausgangslage für die Untersuchung von Augmentation vor.
+
+### Identifizierte Bildstruktur
+
+Aus den vier klassifikationsrelevanten Eigenschaften wird die **halb-gefüllte Symbolfläche** ausgewählt, konkret der einzelne violette halb-Balken in der oberen Reihe (mittlere Spalte). Begründung: "Leer" wird durch eine klare Umrisslinie definiert, "voll" durch eine homogene Farbfläche, "halb" hingegen durch eine periodische Streifenstruktur mit geringem lokalem Kontrast. Glanzlicht oder Schatten waschen die Streifen aus und treiben die Klassifikation in Richtung "voll". Sensorrauschen überlagert die schmale Streifenfrequenz direkt im klassifikationsrelevanten Frequenzbereich. Diese Struktur ist damit das natürliche Stresstest-Element für die Augmentation in Tag 3.
+
+```{python}
+y0, y1 = int(0.05 * H), int(0.25 * H)
+x0, x1 = int(0.40 * W), int(0.62 * W)
+card_crop = img[y0:y1, x0:x1]
+
+sy0, sy1 = int(card_crop.shape[0] * 0.18), int(card_crop.shape[0] * 0.85)
+sx0, sx1 = int(card_crop.shape[1] * 0.33), int(card_crop.shape[1] * 0.58)
+symbol_crop = card_crop[sy0:sy1, sx0:sx1]
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+axes[0].imshow(card_crop)
+axes[0].set_title("Identifizierte Karte | 1 violetter halb-Balken")
+axes[0].set_xlabel("x [Pixel, kartenrelativ]")
+axes[0].set_ylabel("y [Pixel, kartenrelativ]")
+axes[1].imshow(symbol_crop)
+axes[1].set_title("Zoom | halb-Streifenstruktur")
+axes[1].set_xlabel("x [Pixel, symbolrelativ]")
+axes[1].set_ylabel("y [Pixel, symbolrelativ]")
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Im Zoom ist die periodische Streifenstruktur klar erkennbar. Bereits im Original zieht sich eine diagonale Helligkeitsvariation durch das Symbol, die das Streifenmuster lokal abschwächt. Damit ist die Empfindlichkeit der Struktur gegenüber photometrischen Störungen schon im Referenzbild sichtbar.
+
+### Ziel der Augmentation
+
+Ziel ist es, photometrische Aufnahmestörungen einer typischen Smartphone-Heimaufnahme kontrolliert auf das Referenzbild zu übertragen und die Empfindlichkeit der halb-Streifenstruktur quantitativ messbar zu machen. Geometrische Transformationen (Translation, Rotation, Spiegelung) sind laut Aufgabenstellung ausgeschlossen. Konkrete Methoden, Parameter und Konfigurationen folgen an Tag 2.
+
+## Tag 2 -- Methodisches Design
+
+*Wird an Tag 2 vervollständigt.*
+
+## Tag 3 -- Implementierung
+
+*Wird an Tag 3 vervollständigt.*
+
+## Tag 4 -- Evaluation
+
+*Wird an Tag 4 vervollständigt.*
+
+## Tag 5 -- Analyse & Kommunikation
+
+*Wird an Tag 5 vervollständigt.*
+
+# Quellenverzeichnis
+
+[1] Set Enterprises, Inc., "SET - Spielregeln," Fountain Hills, Arizona, USA. Lokale Kopie: `mc2/data/spielregeln/Spielregeln.md`.
+
