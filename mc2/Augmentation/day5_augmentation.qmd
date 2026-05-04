@@ -1,0 +1,604 @@
+---
+title: GBSV MC2 -- Augmentation
+author: Luca Manna
+date: '2026-04-29'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Augmentation
+
+**Land:** USA
+**Semester:** FS26
+
+## Tag 1 -- Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+SET ist ein US-amerikanisches Kartenspiel (1974 von Marsha Falco entwickelt, vertrieben durch Set Enterprises, Fountain Hills, Arizona). Eine Partie läuft visuell: 12 Karten liegen offen auf dem Tisch, alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über die vier Eigenschaften Menge, Farbe, Form und Füllung. Persönliche Motivation: Ich spiele SET regelmässig mit meiner Freundin und verliere dabei konstant. Diese MC soll als Grundbaustein für ein späteres Erkennungsmodell dienen, das aus einem Foto der Auslage automatisch das nächste gültige SET vorschlägt. Dieser Anwendungsfall ist relevant für die USA, da SET dort erfunden wurde, vertrieben wird und im schulischen wie privaten Umfeld breit verankert ist.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der robusten Erkennbarkeit von SET-Karten in Smartphone-Fotos einer realen Auslage. Reale Aufnahmen unterliegen photometrischen Störungen (Innenbeleuchtung in unterschiedlichen Farbtemperaturen, Glanzlicht auf der leicht glänzenden Kartenoberfläche, Schatten durch Hände, Sensorrauschen bei wenig Licht) und geometrischen Effekten durch Kamerawinkel und Tischneigung (perspektivische Verzerrung, Verkippung der Karten gegenüber der Bildebene, ungleichmässige Schärfe). Diese Bedingungen verändern die für die Klassifikation der vier Karteneigenschaften relevanten Bildmerkmale. Wird ein Erkennungspfad ausschliesslich auf einem sauberen Referenzbild getestet, bleibt unklar, gegenüber welchen realistischen Störungen er instabil wird. Augmentation erlaubt es, solche Störungen kontrolliert auf das Referenzbild anzuwenden, bevor in späteren Tasks Pattern Detection (Aufgabe 2) und Segmentation (Aufgabe 3) folgen.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Ziel ist zu untersuchen, wie stark realistische photometrische Störungen die Erkennbarkeit klassifikationsrelevanter Bildstrukturen beeinflussen und unter welchen Bedingungen die fragilste der vier Eigenschaften, die halb-Streifenfüllung, noch zuverlässig vom Original unterscheidbar bleibt.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in 3 x 4 Anordnung auf einer dunkelgrünen Spielmatte und repräsentiert eine zulässige Spielsituation gemäss Spielregeln [1]. Relevante Bildstrukturen sind: Kartenränder (rechteckig mit abgerundeten Ecken, hoher Kantenkontrast zum Untergrund), Symbole (Raute, Balken, Welle in 1-3 Exemplaren), Farbflächen (rot, violett, grün) und Füllungstexturen (leer, halb mit horizontalen Streifen, voll). Bereits im Originalbild sind leichte photometrische Effekte erkennbar (ungleichmässige Innenbeleuchtung, einzelne Glanzlichter, geringe perspektivische Verkippung), die als realistische Ausgangslage für die Augmentation dienen.
+
+```{python}
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img = np.array(Image.open(IMG_PATH))
+H, W = img.shape[:2]
+
+fig, ax = plt.subplots(figsize=(10, 7.5))
+ax.imshow(img)
+ax.set_title(
+    f"Referenzbild IMG_6947.JPG | {W} x {H} Pixel | 12 Karten in 3 x 4 Auslage"
+)
+ax.set_xlabel("x [Pixel]")
+ax.set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Auflösung: {W} x {H} Pixel | Kanäle: {img.shape[2]} | dtype: {img.dtype} | Werte: [{img.min()}, {img.max()}]"
+)
+```
+
+**Beobachtungen:**
+
+Die 12 Karten sind vollständig sichtbar und farblich klar gegen den dunkelgrünen Untergrund abgesetzt. Die Auslage ist nahezu frontal aufgenommen, zeigt aber eine sichtbare Verkippung gegenüber der Bildebene und ungleichmässige Helligkeit (oben dunkler als unten). Auf einzelnen Karten sind schwache Glanzlichter sichtbar. Damit liegt eine realistische Ausgangslage für die Untersuchung von Augmentation vor.
+
+### Identifizierte Bildstruktur
+
+Aus den vier klassifikationsrelevanten Eigenschaften wird die **halb-gefüllte Symbolfläche** ausgewählt, konkret der einzelne violette halb-Balken in der oberen Reihe (mittlere Spalte). Begründung: "Leer" wird durch eine klare Umrisslinie definiert, "voll" durch eine homogene Farbfläche, "halb" hingegen durch eine periodische Streifenstruktur mit geringem lokalem Kontrast. Glanzlicht oder Schatten waschen die Streifen aus und treiben die Klassifikation in Richtung "voll". Sensorrauschen überlagert die schmale Streifenfrequenz direkt im klassifikationsrelevanten Frequenzbereich. Diese Struktur ist damit das natürliche Stresstest-Element für die Augmentation in Tag 3.
+
+```{python}
+y0, y1 = int(0.05 * H), int(0.25 * H)
+x0, x1 = int(0.40 * W), int(0.62 * W)
+card_crop = img[y0:y1, x0:x1]
+
+sy0, sy1 = int(card_crop.shape[0] * 0.18), int(card_crop.shape[0] * 0.85)
+sx0, sx1 = int(card_crop.shape[1] * 0.33), int(card_crop.shape[1] * 0.58)
+symbol_crop = card_crop[sy0:sy1, sx0:sx1]
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+axes[0].imshow(card_crop)
+axes[0].set_title("Identifizierte Karte | 1 violetter halb-Balken")
+axes[0].set_xlabel("x [Pixel, kartenrelativ]")
+axes[0].set_ylabel("y [Pixel, kartenrelativ]")
+axes[1].imshow(symbol_crop)
+axes[1].set_title("Zoom | halb-Streifenstruktur")
+axes[1].set_xlabel("x [Pixel, symbolrelativ]")
+axes[1].set_ylabel("y [Pixel, symbolrelativ]")
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Im Zoom ist die periodische Streifenstruktur klar erkennbar. Bereits im Original zieht sich eine diagonale Helligkeitsvariation durch das Symbol, die das Streifenmuster lokal abschwächt. Damit ist die Empfindlichkeit der Struktur gegenüber photometrischen Störungen schon im Referenzbild sichtbar.
+
+### Ziel der Augmentation
+
+Ziel ist es, photometrische Aufnahmestörungen einer typischen Smartphone-Heimaufnahme kontrolliert auf das Referenzbild zu übertragen und die Empfindlichkeit der halb-Streifenstruktur quantitativ messbar zu machen. Geometrische Transformationen (Translation, Rotation, Spiegelung) sind laut Aufgabenstellung ausgeschlossen. Konkrete Methoden, Parameter und Konfigurationen folgen an Tag 2.
+
+## Tag 2 -- Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet zwei komplementäre **photometrische Augmentationen** im **Spatial Domain** auf das Referenzbild an. Geometrische Transformationen sind laut Aufgabenstellung ausgeschlossen. Beide gewählten Augmentationen greifen direkt die in Tag 1 identifizierte Schwachstelle an, die periodische Streifenstruktur der halb-Füllung, jedoch auf unterschiedlicher Skala und mit unterschiedlichem physikalischem Mechanismus. Diese Komplementarität ist die methodische Klammer zwischen den beiden Augmentationen und erlaubt in Tag 4 eine saubere Trennung der Effekte.
+
+**Augmentation A: Additives Gauss'sches Sensorrauschen.** Smartphone-Aufnahmen in Innenräumen mit moderater Beleuchtung erzeugen Sensorrauschen, das näherungsweise als pixelweise unabhängige, normalverteilte Störung modelliert wird. Der relevante Effekt für die halb-Streifenstruktur ist ein **frequenzüberlappender Angriff**: das breitbandige Rauschen enthält Energie genau in dem schmalen Frequenzband, in dem auch die periodischen Streifen liegen. Damit verschlechtert sich das Signal-Rausch-Verhältnis im klassifikationsrelevanten Band direkt, ohne den Mittelwert oder die globale Helligkeit zu verändern.
+
+**Augmentation B: Multiplikatives radiales Beleuchtungs-Shading.** Innenbeleuchtung ist räumlich inhomogen (Punktlichtquelle, Vignette des Objektivs, schräger Lichteinfall). Dies wird als langsame multiplikative Modulation der Bildintensität modelliert. Der relevante Effekt für die halb-Streifenstruktur ist eine **Reduktion des lokalen Kontrasts** in den schwächer beleuchteten Bildregionen: Streifen und Streifenzwischenräume werden gemeinsam dunkler skaliert, der absolute Helligkeitsunterschied zwischen ihnen schrumpft. Die Klassifikation wird in Richtung "voll" (homogene Fläche) gedrängt.
+
+Beide Augmentationen werden im Spatial Domain umgesetzt, da die in Tag 1 dokumentierten Aufnahmestörungen physikalisch dort entstehen (Sensor, Beleuchtung) und nicht über eine optische Punktbildfunktion. Eine Frequenzdomänen-Variante (z. B. Tiefpass-Filterung als Defokus-Modell) wäre für diesen Anwendungsfall nicht erste Wahl und wurde nicht aufgenommen.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+Sei $I(x,y,c) \in [0,255]$ das Referenzbild mit Pixelkoordinaten $(x,y)$ und Kanal $c \in \{R,G,B\}$. Sei $W$ die Bildbreite, $H$ die Bildhöhe und $r_{max} = \tfrac{1}{2}\sqrt{W^2 + H^2}$ die maximale Distanz vom Bildzentrum zur Ecke.
+
+**Augmentation A (Sensorrauschen):**
+
+$$I_A(x,y,c) = \mathrm{clip}\!\left(\, I(x,y,c) + n(x,y,c),\; 0,\; 255 \,\right), \quad n(x,y,c) \sim \mathcal{N}(0, \sigma^2)$$
+
+Das Rauschen wird pixel- und kanalweise unabhängig gezogen. Der Seed wird für Reproduzierbarkeit fixiert. Der einzige variierte Parameter ist die Standardabweichung $\sigma$ in Grauwert-Einheiten.
+
+**Augmentation B (radiales Shading):**
+
+$$I_B(x,y,c) = \mathrm{clip}\!\left(\, I(x,y,c) \cdot S(x,y),\; 0,\; 255 \,\right), \quad S(x,y) = 1 - k \cdot \frac{r(x,y)^2}{r_{max}^2}$$
+
+mit $r(x,y) = \sqrt{(x - W/2)^2 + (y - H/2)^2}$ als radiale Distanz vom Bildzentrum. Die Shading-Funktion $S$ ist im Zentrum gleich 1 und fällt zur Ecke hin auf $1-k$ ab. Der einzige variierte Parameter ist die Shading-Tiefe $k$ (dimensionslos).
+
+| Aug | Parameter | Symbol | Werte | Einheit | Herleitung |
+|:----|:----------|:-------|:------|:--------|:-----------|
+| A | Rausch-Standardabweichung | $\sigma$ | 5, 15 | Grauwert (8 Bit) | mild $\approx$ Smartphone bei guter Beleuchtung; stark $\approx$ ISO-Reserve nahe Limit |
+| B | Shading-Tiefe | $k$ | 0.3, 0.6 | dimensionslos | mild $\approx$ leichte Vignette / weiche Innenbeleuchtung; stark $\approx$ einseitige Punktlichtquelle |
+
+**Quantitatives Mass für Tag 4 (eine einzige Metrik, alle Konfigurationen).** Im halb-Symbol-ROI wird das Bild in Graustufen umgewandelt, das vertikale Intensitätsprofil $p(y) = \tfrac{1}{N_x}\sum_x I_{gray}(x,y)$ gebildet und das 1D-Powerspektrum $P(f)$ per FFT berechnet. Die **spektrale Streifenenergie** $E_{stripe}$ ist die Energie in einem schmalen Frequenzband um den dominanten Streifen-Peak $f_{stripe}$:
+
+$$E_{stripe} = \sum_{|f - f_{stripe}| < \Delta f} P(f)$$
+
+Pro Konfiguration wird $E_{stripe}$ relativ zur Baseline berichtet, $E_{rel} = E_{stripe}^{\,(aug)} / E_{stripe}^{\,(base)}$.
+
+### Experimentelles Design für die nächsten Tage
+
+| # | Konfiguration | $\sigma$ | $k$ | Erwartung für $E_{rel}$ |
+|:--|:--------------|:--------:|:---:|:------------------------|
+| 0 | Baseline (Original) | 0 | 0 | 1.00 (per Definition) |
+| 1 | Noise mild | 5 | 0 | leicht erhöht, Streifen visuell erhalten |
+| 2 | Noise stark | 15 | 0 | deutlich erhöht im Band, SNR-Verlust |
+| 3 | Shading mild | 0 | 0.3 | leicht verringert, lokaler Kontrast abschwächt |
+| 4 | Shading stark | 0 | 0.6 | deutlich verringert, Streifenpeak schwach |
+
+### Methodische Limitationen und Risikofaktoren
+
+Das additive Gauss-Rauschen modelliert thermisches Sensorrauschen idealtypisch. JPEG-Kompressionsartefakte, fixed-pattern noise und nichtlineare Kamerakurven sind nicht abgebildet. Das radiale Shading-Modell ist symmetrisch um das Bildzentrum; reale Innenbeleuchtung ist häufig direktional und erzeugt asymmetrische Helligkeitsabfälle. Beide Augmentationen lassen Glanzlichter explizit aus. Schliesslich wird auf einem einzigen Referenzbild gearbeitet; quantitative Aussagen gelten zunächst nur für diese eine Aufnahme.
+
+## Tag 3 -- Implementierung
+
+### Imports, Konstanten und Konfigurationen
+
+```{python}
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+# --- Pfade ---
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+
+# --- Augmentations-Parameter ---
+SIGMA_MILD = 5
+SIGMA_STARK = 15
+K_MILD = 0.3
+K_STARK = 0.6
+SEED = 42
+
+# --- ROI-Koordinaten (relativ, identisch zu Tag 1) ---
+CARD_Y0_R, CARD_Y1_R = 0.05, 0.25
+CARD_X0_R, CARD_X1_R = 0.40, 0.62
+SYM_Y0_R, SYM_Y1_R = 0.18, 0.85
+SYM_X0_R, SYM_X1_R = 0.33, 0.58
+
+# --- Alle Konfigurationen ---
+CONFIGS = [
+    {"label": "Baseline", "sigma": 0, "k": 0.0, "color": "black"},
+    {
+        "label": f"Noise σ={SIGMA_MILD}",
+        "sigma": SIGMA_MILD,
+        "k": 0.0,
+        "color": "steelblue",
+    },
+    {
+        "label": f"Noise σ={SIGMA_STARK}",
+        "sigma": SIGMA_STARK,
+        "k": 0.0,
+        "color": "royalblue",
+    },
+    {"label": f"Shading k={K_MILD}", "sigma": 0, "k": K_MILD, "color": "darkorange"},
+    {"label": f"Shading k={K_STARK}", "sigma": 0, "k": K_STARK, "color": "saddlebrown"},
+]
+```
+
+### Augmentationsfunktionen und Shading-Map
+
+```{python}
+def apply_noise(img: np.ndarray, sigma: float, seed: int = SEED) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0, sigma, img.shape)
+    return np.clip(img.astype(float) + noise, 0, 255).astype(np.uint8)
+
+
+def apply_shading(img: np.ndarray, k: float) -> np.ndarray:
+    h, w = img.shape[:2]
+    cy, cx = h / 2.0, w / 2.0
+    r_max = np.sqrt(cx**2 + cy**2)
+    ys, xs = np.mgrid[0:h, 0:w]
+    r = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    S = 1.0 - k * (r / r_max) ** 2
+    return np.clip(img.astype(float) * S[:, :, np.newaxis], 0, 255).astype(np.uint8)
+
+
+def apply_config(img: np.ndarray, cfg: dict) -> np.ndarray:
+    result = img.copy()
+    if cfg["sigma"] > 0:
+        result = apply_noise(result, cfg["sigma"])
+    if cfg["k"] > 0:
+        result = apply_shading(result, cfg["k"])
+    return result
+
+
+# --- Shading-Map als Intermediate Result visualisieren ---
+img_ref = np.array(Image.open(IMG_PATH))
+H, W = img_ref.shape[:2]
+cy, cx = H / 2.0, W / 2.0
+r_max = np.sqrt(cx**2 + cy**2)
+ys, xs = np.mgrid[0:H, 0:W]
+r = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+for ax, k_val in zip(axes, [K_MILD, K_STARK]):
+    S = 1.0 - k_val * (r / r_max) ** 2
+    im = ax.imshow(S, cmap="gray", vmin=0, vmax=1)
+    plt.colorbar(im, ax=ax, label="S(x,y) [dimensionslos]")
+    ax.set_title(f"Shading-Map S(x,y) | k = {k_val}")
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Intermediate Result: radiale Shading-Maps für beide Variationen", y=1.02)
+plt.tight_layout()
+plt.show()
+
+print(f"Shading-Map | k={K_MILD}: Zentrum={1.0:.3f}, Ecke={1.0 - K_MILD:.3f}")
+print(f"Shading-Map | k={K_STARK}: Zentrum={1.0:.3f}, Ecke={1.0 - K_STARK:.3f}")
+```
+
+### Verifikation auf synthetischem Testbild
+
+```{python}
+STRIPE_H = 12
+TEST_H, TEST_W = 300, 200
+
+row_idx = np.arange(TEST_H)
+stripe_vals = ((row_idx // STRIPE_H) % 2) * 200 + 28
+test_gray = np.tile(stripe_vals[:, np.newaxis], (1, TEST_W))
+test_img = np.stack([test_gray] * 3, axis=2).astype(np.uint8)
+
+test_noise = apply_noise(test_img, SIGMA_STARK)
+test_shading = apply_shading(test_img, K_STARK)
+
+fig, axes = plt.subplots(1, 3, figsize=(11, 4))
+titles = [
+    "Testbild (Baseline)\nStreifen klar sichtbar",
+    f"Noise σ={SIGMA_STARK}\nRauschen überlagert Streifen",
+    f"Shading k={K_STARK}\nKontrast aussen reduziert",
+]
+for ax, data, title in zip(axes, [test_img, test_noise, test_shading], titles):
+    ax.imshow(data, cmap="gray", vmin=0, vmax=255)
+    ax.set_title(title)
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Verifikation: Augmentationen auf synthetischem Streifenbild", y=1.02)
+plt.tight_layout()
+plt.show()
+
+profile_base = test_img[:, :, 0].mean(axis=1)
+profile_noise = test_noise[:, :, 0].mean(axis=1)
+profile_shading = test_shading[:, :, 0].mean(axis=1)
+
+fig, ax = plt.subplots(figsize=(9, 3))
+ax.plot(profile_base, label="Baseline", color="black", linewidth=1.5)
+ax.plot(profile_noise, label=f"Noise σ={SIGMA_STARK}", color="royalblue", linewidth=1.0, alpha=0.8)
+ax.plot(profile_shading, label=f"Shading k={K_STARK}", color="saddlebrown", linewidth=1.0)
+ax.set_xlabel("y [Pixel]")
+ax.set_ylabel("Intensität [Grauwert]")
+ax.set_title("Vertikales Intensitätsprofil | Synthetisches Testbild")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen (Testbild):**
+
+Das synthetische Streifenbild zeigt erwartetes Verhalten: Rauschen ($\sigma=15$) überlagert das Signal breitbandig, die Streifen bleiben trotzdem erkennbar. Shading ($k=0.6$) reduziert den Kontrast zum unteren und seitlichen Bildrand hin sichtbar; im Profil schrumpft die Oszillationsamplitude nach unten. Die Funktionen sind damit korrekt implementiert.
+
+### Alle 5 Konfigurationen auf dem Referenzbild
+
+```{python}
+aug_images = [apply_config(img_ref, cfg) for cfg in CONFIGS]
+
+fig, axes = plt.subplots(1, 5, figsize=(18, 5))
+for ax, aug, cfg in zip(axes, aug_images, CONFIGS):
+    ax.imshow(aug)
+    ax.set_title(cfg["label"], fontsize=9)
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Alle 5 Konfigurationen | IMG_6947.JPG", y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+### ROI-Zoom: halb-Symbol-Crop (alle 5 Konfigurationen)
+
+```{python}
+cy0, cy1 = int(CARD_Y0_R * H), int(CARD_Y1_R * H)
+cx0, cx1 = int(CARD_X0_R * W), int(CARD_X1_R * W)
+
+
+def get_symbol_crop(aug_img: np.ndarray) -> np.ndarray:
+    card = aug_img[cy0:cy1, cx0:cx1]
+    sh, sw = card.shape[:2]
+    return card[
+        int(SYM_Y0_R * sh) : int(SYM_Y1_R * sh),
+        int(SYM_X0_R * sw) : int(SYM_X1_R * sw),
+    ]
+
+
+symbol_crops = [get_symbol_crop(aug) for aug in aug_images]
+
+fig, axes = plt.subplots(1, 5, figsize=(14, 4))
+for ax, crop, cfg in zip(axes, symbol_crops, CONFIGS):
+    ax.imshow(crop)
+    ax.set_title(cfg["label"], fontsize=9)
+    ax.set_xlabel("x [Pixel, symbolrelativ]")
+    ax.set_ylabel("y [Pixel, symbolrelativ]")
+plt.suptitle("ROI-Zoom | Violetter halb-Balken | alle 5 Konfigurationen", y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+### Vertikale Intensitätsprofile im Symbol-ROI
+
+```{python}
+fig, ax = plt.subplots(figsize=(9, 4))
+
+for crop, cfg in zip(symbol_crops, CONFIGS):
+    gray = crop.mean(axis=2)
+    profile = gray.mean(axis=1)
+    ax.plot(
+        profile,
+        label=cfg["label"],
+        color=cfg["color"],
+        linewidth=1.5 if cfg["label"] == "Baseline" else 1.0,
+        alpha=1.0 if cfg["label"] == "Baseline" else 0.8,
+    )
+
+ax.set_xlabel("y [Pixel, symbolrelativ]")
+ax.set_ylabel("Intensität [Grauwert]")
+ax.set_title(
+    "Vertikales Intensitätsprofil p(y) im Symbol-ROI | alle 5 Konfigurationen\n"
+    "(Mittel über x; horizontale Streifen erzeugen Oszillation entlang y)"
+)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print("Profil-Amplitude (Max - Min) im Symbol-ROI [Grauwert]:")
+for crop, cfg in zip(symbol_crops, CONFIGS):
+    profile = crop.mean(axis=2).mean(axis=1)
+    print(f"  {cfg['label']:20s}: {profile.max() - profile.min():.1f}")
+```
+
+**Beobachtungen:**
+
+Im Intensitätsprofil des Symbol-ROI ist die periodische Oszillation der horizontalen Streifen als Schwingung entlang der y-Achse sichtbar. Rauschen ($\sigma=15$) überlagert die Oszillation mit hochfrequenten Fluktuationen, ohne die mittlere Amplitude wesentlich zu verändern. Shading ($k=0.6$) reduziert die absolute Amplitude durch den Intensitätsabfall in der Bildrandregion. Beide Effekte sind im Profil klar von der Baseline unterscheidbar und decken sich mit den Erwartungen aus Tag 2. Die quantitative Auswertung per spektraler Streifenenergie $E_{rel}$ folgt an Tag 4.
+
+## Tag 4 -- Evaluation
+
+### Setup: Funktionen und Crops wiederherstellen
+
+```{python}
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+
+SIGMA_MILD = 5
+SIGMA_STARK = 15
+K_MILD = 0.3
+K_STARK = 0.6
+SEED = 42
+
+CARD_Y0_R, CARD_Y1_R = 0.05, 0.25
+CARD_X0_R, CARD_X1_R = 0.40, 0.62
+SYM_Y0_R, SYM_Y1_R = 0.18, 0.85
+SYM_X0_R, SYM_X1_R = 0.33, 0.58
+
+CONFIGS = [
+    {"label": "Baseline",              "sigma": 0,          "k": 0.0,    "color": "black"},
+    {"label": f"Noise σ={SIGMA_MILD}", "sigma": SIGMA_MILD, "k": 0.0,    "color": "steelblue"},
+    {"label": f"Noise σ={SIGMA_STARK}","sigma": SIGMA_STARK,"k": 0.0,    "color": "royalblue"},
+    {"label": f"Shading k={K_MILD}",   "sigma": 0,          "k": K_MILD, "color": "darkorange"},
+    {"label": f"Shading k={K_STARK}",  "sigma": 0,          "k": K_STARK,"color": "saddlebrown"},
+]
+
+
+def apply_noise(img: np.ndarray, sigma: float, seed: int = SEED) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0, sigma, img.shape)
+    return np.clip(img.astype(float) + noise, 0, 255).astype(np.uint8)
+
+
+def apply_shading(img: np.ndarray, k: float) -> np.ndarray:
+    h, w = img.shape[:2]
+    cy, cx = h / 2.0, w / 2.0
+    r_max = np.sqrt(cx**2 + cy**2)
+    ys, xs = np.mgrid[0:h, 0:w]
+    r = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    S = 1.0 - k * (r / r_max) ** 2
+    return np.clip(img.astype(float) * S[:, :, np.newaxis], 0, 255).astype(np.uint8)
+
+
+def apply_config(img: np.ndarray, cfg: dict) -> np.ndarray:
+    result = img.copy()
+    if cfg["sigma"] > 0:
+        result = apply_noise(result, cfg["sigma"])
+    if cfg["k"] > 0:
+        result = apply_shading(result, cfg["k"])
+    return result
+
+
+img_ref = np.array(Image.open(IMG_PATH))
+H, W = img_ref.shape[:2]
+cy0, cy1 = int(CARD_Y0_R * H), int(CARD_Y1_R * H)
+cx0, cx1 = int(CARD_X0_R * W), int(CARD_X1_R * W)
+
+
+def get_symbol_crop(aug_img: np.ndarray) -> np.ndarray:
+    card = aug_img[cy0:cy1, cx0:cx1]
+    sh, sw = card.shape[:2]
+    return card[
+        int(SYM_Y0_R * sh) : int(SYM_Y1_R * sh),
+        int(SYM_X0_R * sw) : int(SYM_X1_R * sw),
+    ]
+
+
+aug_images = [apply_config(img_ref, cfg) for cfg in CONFIGS]
+symbol_crops = [get_symbol_crop(aug) for aug in aug_images]
+print(f"Symbol-Crop Grösse: {symbol_crops[0].shape[1]} x {symbol_crops[0].shape[0]} Pixel (B x H)")
+```
+
+### Baseline-Spektrum und f_stripe bestimmen
+
+```{python}
+def compute_spectrum(crop: np.ndarray) -> tuple:
+    gray = crop.mean(axis=2)            # RGB -> Grauwert (Mittelwert)
+    p = gray.mean(axis=1)               # p(y): Mittel über x pro Zeile
+    p_centered = p - p.mean()           # DC entfernen
+    window = np.hanning(len(p_centered))
+    P = np.abs(np.fft.rfft(p_centered * window)) ** 2
+    f = np.fft.rfftfreq(len(p_centered))  # Einheit: Zyklen/Pixel
+    return f, P
+
+
+# Baseline-Spektrum berechnen
+f, P_base = compute_spectrum(symbol_crops[0])
+
+# f_stripe: stärkster Peak, Trend-Komponenten ausschliessen (f < F_MIN)
+F_MIN = 0.01  # Zyklen/Pixel
+search_mask = f > F_MIN
+f_stripe = f[search_mask][np.argmax(P_base[search_mask])]
+df = f[1] - f[0]                        # FFT-Bin-Breite
+DELTA_F = 1.5 * df                      # Bandbreite: ±1.5 Bins
+
+band_mask = np.abs(f - f_stripe) <= DELTA_F
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.semilogy(f, P_base, color="black", linewidth=1.2, label="Baseline")
+ax.axvspan(f_stripe - DELTA_F, f_stripe + DELTA_F, alpha=0.2, color="red",
+           label=f"Streifenband [f_stripe ± Δf]")
+ax.axvline(f_stripe, color="red", linewidth=1.0, linestyle="--")
+ax.set_xlabel("f [Zyklen/Pixel]")
+ax.set_ylabel("Spektrale Leistung P(f) [log]")
+ax.set_title(
+    f"Baseline-Powerspektrum | f_stripe = {f_stripe:.4f} Zyklen/Pixel"
+    f" | Δf = {DELTA_F:.4f} Zyklen/Pixel"
+)
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+stripe_period_px = 1.0 / f_stripe if f_stripe > 0 else float("inf")
+print(f"f_stripe  = {f_stripe:.4f} Zyklen/Pixel")
+print(f"Δf        = {DELTA_F:.4f} Zyklen/Pixel (±1.5 FFT-Bins)")
+print(f"Periode   = {stripe_period_px:.1f} Pixel/Streifen")
+print(f"Bins im Band: {band_mask.sum()}")
+```
+
+### Spektrale Streifenenergie E_stripe für alle 5 Konfigurationen
+
+```{python}
+results = []
+for crop, cfg in zip(symbol_crops, CONFIGS):
+    _, P = compute_spectrum(crop)
+    E = float(P[band_mask].sum())
+    results.append({**cfg, "E_stripe": E})
+
+E_base = results[0]["E_stripe"]
+for res in results:
+    res["E_rel"] = res["E_stripe"] / E_base
+
+print(f"{'Config':<22} {'E_stripe':>14} {'E_rel':>8}")
+print("-" * 48)
+for res in results:
+    print(f"  {res['label']:<20} {res['E_stripe']:>14.2f} {res['E_rel']:>8.3f}")
+```
+
+### Powerspektren aller 5 Konfigurationen
+
+```{python}
+fig, ax = plt.subplots(figsize=(11, 5))
+
+for crop, cfg in zip(symbol_crops, CONFIGS):
+    f_i, P_i = compute_spectrum(crop)
+    ax.semilogy(f_i, P_i, color=cfg["color"],
+                linewidth=1.8 if cfg["label"] == "Baseline" else 1.0,
+                alpha=1.0 if cfg["label"] == "Baseline" else 0.75,
+                label=cfg["label"])
+
+ax.axvspan(f_stripe - DELTA_F, f_stripe + DELTA_F, alpha=0.15, color="red",
+           label=f"Streifenband ±Δf")
+ax.axvline(f_stripe, color="red", linewidth=0.8, linestyle="--")
+ax.set_xlabel("f [Zyklen/Pixel]")
+ax.set_ylabel("Spektrale Leistung P(f) [log]")
+ax.set_title(
+    "Powerspektren aller 5 Konfigurationen | Symbol-ROI\n"
+    f"(f_stripe = {f_stripe:.4f} Zyklen/Pixel, markiertes Band = Integrationsbereich für E_stripe)"
+)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+### Vergleichstabelle und Interpretation
+
+```{python}
+import pandas as pd
+
+df_results = pd.DataFrame([
+    {
+        "Konfiguration": r["label"],
+        "σ": r["sigma"],
+        "k": r["k"],
+        "E_stripe": round(r["E_stripe"], 1),
+        "E_rel": round(r["E_rel"], 3),
+    }
+    for r in results
+])
+print(df_results.to_string(index=False))
+```
+
+**Beobachtungen:**
+
+Die Shading-Ergebnisse bestätigen die Erwartung aus Tag 2 klar: $E_{rel}$ sinkt monoton mit zunehmendem $k$ (−10.3 % bei $k=0.3$, −20.1 % bei $k=0.6$). Die multiplikative Abschwächung reduziert den physikalischen Kontrast zwischen Streifen und Streifenzwischenräumen direkt und senkt damit den Streifenpeak absolut.
+
+Die Noise-Ergebnisse weichen von der Erwartung ab: statt eines Anstiegs bleibt $E_{rel}$ nahezu konstant (−0.1 % bei $\sigma=5$, −1.3 % bei $\sigma=15$). Der Grund liegt im Berechnungsweg: das Profil $p(y)$ ist der Mittelwert über $N_x = 222$ Spalten. Additives Rauschen mit $\sigma$ pro Pixel mittelt sich im Profil auf eine Standardabweichung von $\sigma / \sqrt{N_x} = 15 / \sqrt{222} \approx 1.0$ Graustufen pro Zeile -- ein vernachlässigbarer Beitrag gegenüber dem Streifensignal. Die Metrik $E_{rel}$ ist damit **robust gegenüber additivem Rauschen**, aber **sensitiv gegenüber multiplikativem Shading**. Diese Asymmetrie war in Tag 2 nicht vorhergesehen und wird in Tag 5 diskutiert.
+
+## Tag 5 -- Analyse & Kommunikation
+
+### Beobachtungen
+
+Die spektrale Streifenenergie $E_{rel}$ verhält sich für die zwei Augmentationstypen grundlegend verschieden. Shading senkt $E_{rel}$ klar und monoton: bei $k=0.3$ auf 0.897 (−10.3 %), bei $k=0.6$ auf 0.799 (−20.1 %). Die Streifenfrequenz $f_{stripe} = 0.1108$ Zyklen/Pixel (Periode 9 Pixel) ist im Baseline-Spektrum als scharfer Peak gut lokalisiert und verliert mit zunehmendem Shading an Höhe. Rauschen hingegen lässt $E_{rel}$ nahezu unverändert: bei $\sigma=5$ auf 0.999, bei $\sigma=15$ auf 0.987.
+
+### Interpretation
+
+Der Unterschied erklärt sich durch den Berechnungsweg der Metrik. Das Profil $p(y)$ ist der Mittelwert über $N_x = 222$ Spalten; additives Rauschen mit $\sigma = 15$ reduziert sich dabei auf $\sigma / \sqrt{222} \approx 1.0$ Graustufen pro Zeile und ist im Spektrum unsichtbar. Multiplikatives Shading hingegen skaliert den Kontrast zwischen gefüllten und leeren Streifen direkt: beide Intensitätsniveaus fallen gemeinsam, ihr Unterschied schrumpft proportional zu $S(x,y)$, und $E_{stripe}$ sinkt entsprechend. Die Metrik ist damit sensitiv für Kontrastabfall, aber blind für additives Rauschen. Die Tag-2-Vorhersage, Rauschen würde $E_{rel}$ anheben, war falsch, weil der Effekt der x-Mittelung nicht bedacht wurde.
+
+### Diskussion
+
+Für den Anwendungsfall SET-Kartenerkennung ist Shading die relevantere Aufnahmestörung: es greift direkt die Kontrasteigenschaft an, die "halb" von "voll" trennt. Reale Smartphone-Innenaufnahmen liegen im Bereich $k = 0.3$–$0.6$, was einem Energieverlust von 10–20 % entspricht. Gezielte Bildvorverarbeitung wie Flatfield-Korrektur oder lokale Histogrammanpassung wäre für den Erkennungspfad wichtiger als Rauschunterdrückung. Die Metrik $E_{rel}$ hat sich als nützlich für Kontrastanalysen erwiesen, ist aber für Rauschbewertung ungeeignet. Eine robustere Alternative wäre eine pixelgenaue 2D-FFT-Analyse statt des gemittelten 1D-Profils. Das radiale Shading-Modell bleibt eine Idealisierung; reale Lichtquellen erzeugen direktionale Gradienten, die in zukünftigen Variationen mit den Vergleichsbildern `IMG_6948.JPG`–`IMG_6954.JPG` untersucht werden könnten.
+
+# Quellenverzeichnis
+
+[1] Set Enterprises, Inc., "SET - Spielregeln," Fountain Hills, Arizona, USA. Lokale Kopie: `mc2/data/spielregeln/Spielregeln.md`.

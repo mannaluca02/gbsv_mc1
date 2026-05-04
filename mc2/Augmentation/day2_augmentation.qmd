@@ -1,0 +1,182 @@
+---
+title: GBSV MC2 -- Augmentation
+author: Luca Manna
+date: '2026-04-28'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Augmentation
+
+**Land:** USA
+**Semester:** FS26
+
+## Tag 1 -- Daten & Domäne
+
+### Anwendungsfall
+*Fokus: Domäne und Anwendungskontext*
+
+SET ist ein US-amerikanisches Kartenspiel (1974 von Marsha Falco entwickelt, vertrieben durch Set Enterprises, Fountain Hills, Arizona). Eine Partie läuft visuell: 12 Karten liegen offen auf dem Tisch, alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über die vier Eigenschaften Menge, Farbe, Form und Füllung. Persönliche Motivation: Ich spiele SET regelmässig mit meiner Freundin und verliere dabei konstant. Diese MC soll als Grundbaustein für ein späteres Erkennungsmodell dienen, das aus einem Foto der Auslage automatisch das nächste gültige SET vorschlägt. Dieser Anwendungsfall ist relevant für die USA, da SET dort erfunden wurde, vertrieben wird und im schulischen wie privaten Umfeld breit verankert ist.
+
+### Problemstellung
+*Fokus: technische Schwachstelle*
+
+Dieses Projekt befasst sich mit der robusten Erkennbarkeit von SET-Karten in Smartphone-Fotos einer realen Auslage. Reale Aufnahmen unterliegen photometrischen Störungen (Innenbeleuchtung in unterschiedlichen Farbtemperaturen, Glanzlicht auf der leicht glänzenden Kartenoberfläche, Schatten durch Hände, Sensorrauschen bei wenig Licht) und geometrischen Effekten durch Kamerawinkel und Tischneigung (perspektivische Verzerrung, Verkippung der Karten gegenüber der Bildebene, ungleichmässige Schärfe). Diese Bedingungen verändern die für die Klassifikation der vier Karteneigenschaften relevanten Bildmerkmale. Wird ein Erkennungspfad ausschliesslich auf einem sauberen Referenzbild getestet, bleibt unklar, gegenüber welchen realistischen Störungen er instabil wird. Augmentation erlaubt es, solche Störungen kontrolliert auf das Referenzbild anzuwenden, bevor in späteren Tasks Pattern Detection (Aufgabe 2) und Segmentation (Aufgabe 3) folgen.
+
+### Experimentelles Ziel
+*Fokus: Untersuchungsziel auf konzeptioneller Ebene*
+
+Ziel ist zu untersuchen, wie stark realistische photometrische Aufnahmestörungen die Erkennbarkeit klassifikationsrelevanter Bildstrukturen beeinflussen und unter welchen Bedingungen die fragilste der vier Eigenschaften, die halb-Streifenfüllung, noch zuverlässig vom Original unterscheidbar bleibt.
+
+### Datendefinition, Quelle und Visualisierung
+*Fokus: Datencharakteristik, Datenquelle und visuelle Inspektion*
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in 3 x 4 Anordnung auf einer dunkelgrünen Spielmatte und repräsentiert eine zulässige Spielsituation gemäss Spielregeln [1]. Relevante Bildstrukturen sind: Kartenränder (rechteckig mit abgerundeten Ecken, hoher Kantenkontrast zum Untergrund), Symbole (Raute, Balken, Welle in 1-3 Exemplaren), Farbflächen (rot, violett, grün) und Füllungstexturen (leer, halb mit horizontalen Streifen, voll). Bereits im Originalbild sind leichte photometrische Effekte erkennbar (ungleichmässige Innenbeleuchtung, einzelne Glanzlichter, geringe perspektivische Verkippung), die als realistische Ausgangslage für die Augmentation dienen.
+
+```{python}
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img = np.array(Image.open(IMG_PATH))
+H, W = img.shape[:2]
+
+fig, ax = plt.subplots(figsize=(10, 7.5))
+ax.imshow(img)
+ax.set_title(
+    f"Referenzbild IMG_6947.JPG | {W} x {H} Pixel | 12 Karten in 3 x 4 Auslage"
+)
+ax.set_xlabel("x [Pixel]")
+ax.set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Auflösung: {W} x {H} Pixel | Kanäle: {img.shape[2]} | dtype: {img.dtype} | Werte: [{img.min()}, {img.max()}]"
+)
+```
+
+**Beobachtungen:**
+
+Die 12 Karten sind vollständig sichtbar und farblich klar gegen den dunkelgrünen Untergrund abgesetzt. Die Auslage ist nahezu frontal aufgenommen, zeigt aber eine sichtbare Verkippung gegenüber der Bildebene und ungleichmässige Helligkeit (oben dunkler als unten). Auf einzelnen Karten sind schwache Glanzlichter sichtbar. Damit liegt eine realistische Ausgangslage für die Untersuchung von Augmentation vor.
+
+### Identifizierte Bildstruktur
+
+Aus den vier klassifikationsrelevanten Eigenschaften wird die **halb-gefüllte Symbolfläche** ausgewählt, konkret der einzelne violette halb-Balken in der oberen Reihe (mittlere Spalte). Begründung: "Leer" wird durch eine klare Umrisslinie definiert, "voll" durch eine homogene Farbfläche, "halb" hingegen durch eine periodische Streifenstruktur mit geringem lokalem Kontrast. Glanzlicht oder Schatten waschen die Streifen aus und treiben die Klassifikation in Richtung "voll". Sensorrauschen überlagert die schmale Streifenfrequenz direkt im klassifikationsrelevanten Frequenzbereich. Diese Struktur ist damit das natürliche Stresstest-Element für die Augmentation in Tag 3.
+
+```{python}
+y0, y1 = int(0.05 * H), int(0.25 * H)
+x0, x1 = int(0.40 * W), int(0.62 * W)
+card_crop = img[y0:y1, x0:x1]
+
+sy0, sy1 = int(card_crop.shape[0] * 0.18), int(card_crop.shape[0] * 0.85)
+sx0, sx1 = int(card_crop.shape[1] * 0.33), int(card_crop.shape[1] * 0.58)
+symbol_crop = card_crop[sy0:sy1, sx0:sx1]
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+axes[0].imshow(card_crop)
+axes[0].set_title("Identifizierte Karte | 1 violetter halb-Balken")
+axes[0].set_xlabel("x [Pixel, kartenrelativ]")
+axes[0].set_ylabel("y [Pixel, kartenrelativ]")
+axes[1].imshow(symbol_crop)
+axes[1].set_title("Zoom | halb-Streifenstruktur")
+axes[1].set_xlabel("x [Pixel, symbolrelativ]")
+axes[1].set_ylabel("y [Pixel, symbolrelativ]")
+plt.tight_layout()
+plt.show()
+```
+
+**Beobachtungen:**
+
+Im Zoom ist die periodische Streifenstruktur klar erkennbar. Bereits im Original zieht sich eine diagonale Helligkeitsvariation durch das Symbol, die das Streifenmuster lokal abschwächt. Damit ist die Empfindlichkeit der Struktur gegenüber photometrischen Störungen schon im Referenzbild sichtbar.
+
+### Ziel der Augmentation
+
+Ziel ist es, photometrische Aufnahmestörungen einer typischen Smartphone-Heimaufnahme kontrolliert auf das Referenzbild zu übertragen und die Empfindlichkeit der halb-Streifenstruktur quantitativ messbar zu machen. Geometrische Transformationen (Translation, Rotation, Spiegelung) sind laut Aufgabenstellung ausgeschlossen. Konkrete Methoden, Parameter und Konfigurationen folgen an Tag 2.
+
+## Tag 2 -- Methodisches Design
+
+### Theoretische Grundlage und Methodenwahl
+*Fokus: prinzipienbasierte Begründung im Kontext des Anwendungsfalls*
+
+Diese Untersuchung wendet zwei komplementäre **photometrische Augmentationen** im **Spatial Domain** auf das Referenzbild an. Geometrische Transformationen sind laut Aufgabenstellung ausgeschlossen. Beide gewählten Augmentationen greifen direkt die in Tag 1 identifizierte Schwachstelle an, die periodische Streifenstruktur der halb-Füllung, jedoch auf unterschiedlicher Skala und mit unterschiedlichem physikalischem Mechanismus. Diese Komplementarität ist die methodische Klammer zwischen den beiden Augmentationen und erlaubt in Tag 4 eine saubere Trennung der Effekte.
+
+**Augmentation A: Additives Gauss'sches Sensorrauschen.** Smartphone-Aufnahmen in Innenräumen mit moderater Beleuchtung erzeugen Sensorrauschen, das näherungsweise als pixelweise unabhängige, normalverteilte Störung modelliert wird. Der relevante Effekt für die halb-Streifenstruktur ist ein **frequenzüberlappender Angriff**: das breitbandige Rauschen enthält Energie genau in dem schmalen Frequenzband, in dem auch die periodischen Streifen liegen. Damit verschlechtert sich das Signal-Rausch-Verhältnis im klassifikationsrelevanten Band direkt, ohne den Mittelwert oder die globale Helligkeit zu verändern.
+
+**Augmentation B: Multiplikatives radiales Beleuchtungs-Shading.** Innenbeleuchtung ist räumlich inhomogen (Punktlichtquelle, Vignette des Objektivs, schräger Lichteinfall). Dies wird als langsame multiplikative Modulation der Bildintensität modelliert. Der relevante Effekt für die halb-Streifenstruktur ist eine **Reduktion des lokalen Kontrasts** in den schwächer beleuchteten Bildregionen: Streifen und Streifenzwischenräume werden gemeinsam dunkler skaliert, der absolute Helligkeitsunterschied zwischen ihnen schrumpft. Die Klassifikation wird in Richtung "voll" (homogene Fläche) gedrängt.
+
+Beide Augmentationen werden im Spatial Domain umgesetzt, da die in Tag 1 dokumentierten Aufnahmestörungen physikalisch dort entstehen (Sensor, Beleuchtung) und nicht über eine optische Punktbildfunktion. Eine Frequenzdomänen-Variante (z. B. Tiefpass-Filterung als Defokus-Modell) wäre für diesen Anwendungsfall nicht erste Wahl und wurde nicht aufgenommen.
+
+### Parameterdefinition und mathematische Spezifikation
+*Fokus: explizite Parameterwahl, Herleitung und Einheitenkonsistenz*
+
+Sei $I(x,y,c) \in [0,255]$ das Referenzbild mit Pixelkoordinaten $(x,y)$ und Kanal $c \in \{R,G,B\}$. Sei $W$ die Bildbreite, $H$ die Bildhöhe und $r_{max} = \tfrac{1}{2}\sqrt{W^2 + H^2}$ die maximale Distanz vom Bildzentrum zur Ecke.
+
+**Augmentation A (Sensorrauschen):**
+
+$$I_A(x,y,c) = \mathrm{clip}\!\left(\, I(x,y,c) + n(x,y,c),\; 0,\; 255 \,\right), \quad n(x,y,c) \sim \mathcal{N}(0, \sigma^2)$$
+
+Das Rauschen wird pixel- und kanalweise unabhängig gezogen. Der Seed wird für Reproduzierbarkeit fixiert. Der einzige variierte Parameter ist die Standardabweichung $\sigma$ in Grauwert-Einheiten.
+
+**Augmentation B (radiales Shading):**
+
+$$I_B(x,y,c) = \mathrm{clip}\!\left(\, I(x,y,c) \cdot S(x,y),\; 0,\; 255 \,\right), \quad S(x,y) = 1 - k \cdot \frac{r(x,y)^2}{r_{max}^2}$$
+
+mit $r(x,y) = \sqrt{(x - W/2)^2 + (y - H/2)^2}$ als radiale Distanz vom Bildzentrum. Die Shading-Funktion $S$ ist im Zentrum gleich 1 und fällt zur Ecke hin auf $1-k$ ab. Der einzige variierte Parameter ist die Shading-Tiefe $k$ (dimensionslos).
+
+| Aug | Parameter | Symbol | Werte | Einheit | Herleitung |
+|:----|:----------|:-------|:------|:--------|:-----------|
+| A | Rausch-Standardabweichung | $\sigma$ | 5, 15 | Grauwert (8 Bit) | mild $\approx$ Smartphone bei guter Beleuchtung; stark $\approx$ ISO-Reserve nahe Limit |
+| B | Shading-Tiefe | $k$ | 0.3, 0.6 | dimensionslos | mild $\approx$ leichte Vignette / weiche Innenbeleuchtung; stark $\approx$ einseitige Punktlichtquelle |
+
+**Quantitatives Mass für Tag 4 (eine einzige Metrik, alle Konfigurationen).** Im halb-Symbol-ROI (Symbol-Crop aus Tag 1) wird das Bild in Graustufen umgewandelt, das vertikale Intensitätsprofil $p(y) = \tfrac{1}{N_x}\sum_x I_{gray}(x,y)$ gebildet (Mittel über die Spalten, da die Streifen horizontal verlaufen) und das 1D-Powerspektrum $P(f)$ per FFT berechnet. Die **spektrale Streifenenergie** $E_{stripe}$ ist die Energie in einem schmalen Frequenzband um den dominanten Streifen-Peak $f_{stripe}$, der am Baseline-ROI bestimmt wird:
+
+$$E_{stripe} = \sum_{|f - f_{stripe}| < \Delta f} P(f)$$
+
+Pro Konfiguration wird $E_{stripe}$ relativ zur Baseline berichtet, $E_{rel} = E_{stripe}^{\,(aug)} / E_{stripe}^{\,(base)}$. Werte nahe 1 bedeuten erhaltene Streifenstruktur, Werte $\ll 1$ bedeuten ausgewaschene Streifen. Diese Metrik ist direkt an die in Tag 1 formulierte Hypothese gekoppelt (Streifen liegen in einem schmalen Frequenzband und werden dort angegriffen) und wird konsistent über alle fünf Konfigurationen angewendet.
+
+### Experimentelles Design für die nächsten Tage
+*Fokus: strukturierte Parametervariation und theoretische Vorhersage*
+
+Die **Baseline-Konfiguration** ist das unveränderte Referenzbild $I$. Davon ausgehend werden pro Augmentation zwei Variationen (mild, stark) erzeugt, total fünf Konfigurationen. Pro Konfiguration wird der gleiche halb-Symbol-ROI aus Tag 1 verwendet, sodass die spektrale Streifenenergie direkt vergleichbar ist.
+
+| # | Konfiguration | $\sigma$ | $k$ | Erwartung für $E_{rel}$ |
+|:--|:--------------|:--------:|:---:|:------------------------|
+| 0 | Baseline (Original) | 0 | 0 | 1.00 (per Definition) |
+| 1 | Noise mild | 5 | 0 | leicht erhöht (Rauschenergie addiert sich breitbandig, schmales Streifenband absorbiert einen Anteil), Streifen visuell erhalten |
+| 2 | Noise stark | 15 | 0 | deutlich erhöht im Band, aber Verhältnis Streifenpeak zu Rauschsockel sinkt; SNR-Verlust |
+| 3 | Shading mild | 0 | 0.3 | leicht verringert, Streifenpeak skaliert quadratisch mit lokaler Helligkeit nach unten |
+| 4 | Shading stark | 0 | 0.6 | deutlich verringert, lokaler Kontrast eingebrochen, Streifenpeak schwach |
+
+Die zwei Augmentationen wirken in entgegengesetzte Richtungen auf $E_{stripe}$: Rauschen hebt die Energie im Streifenband an, ohne dass Streifen tatsächlich besser erkennbar werden; Shading senkt die Energie, weil der Kontrast zwischen Streifen und Zwischenraum schrumpft. Beides ist klassifikationsschädlich, manifestiert sich aber in der Metrik unterschiedlich. Diese Asymmetrie wird in Tag 5 inhaltlich diskutiert.
+
+### Methodische Limitationen und Risikofaktoren
+*Fokus: Annahmen, Stabilität und potenzielle Fehlinterpretation*
+
+Das additive Gauss-Rauschen modelliert thermisches Sensorrauschen idealtypisch. JPEG-Kompressionsartefakte, fixed-pattern noise und nichtlineare Kamerakurven sind nicht abgebildet. Das radiale Shading-Modell ist symmetrisch um das Bildzentrum; reale Innenbeleuchtung ist häufig direktional und erzeugt asymmetrische Helligkeitsabfälle. Beide Augmentationen lassen Glanzlichter (lokale Sättigung, Spekularreflexion auf der Kartenoberfläche) explizit aus, da diese in Tag 1 zwar erwähnt werden, aber kein einfaches Ein-Parameter-Modell zulassen. Schliesslich wird auf einem einzigen Referenzbild gearbeitet; quantitative Aussagen gelten zunächst nur für diese eine Aufnahme. Die Methodik ist jedoch so spezifiziert, dass sie auf die Vergleichsaufnahmen `IMG_6948.JPG` bis `IMG_6954.JPG` direkt übertragbar ist, falls in Tag 5 eine Robustheitsprüfung nötig wird.
+
+## Tag 3 -- Implementierung
+
+*Wird an Tag 3 vervollständigt.*
+
+## Tag 4 -- Evaluation
+
+*Wird an Tag 4 vervollständigt.*
+
+## Tag 5 -- Analyse & Kommunikation
+
+*Wird an Tag 5 vervollständigt.*
+
+# Quellenverzeichnis
+
+[1] Set Enterprises, Inc., "SET - Spielregeln," Fountain Hills, Arizona, USA. Lokale Kopie: `mc2/data/spielregeln/Spielregeln.md`.
+
