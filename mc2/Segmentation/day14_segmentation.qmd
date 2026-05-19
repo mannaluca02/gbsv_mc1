@@ -1,0 +1,790 @@
+---
+title: GBSV MC2 -- Segmentation
+author: Luca Manna
+date: '2026-05-13'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Segmentation
+
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 11 -- Daten & Domäne
+
+### Anwendungsfall
+
+Das Kartenspiel SET wurde 1974 von Marsha Falco in den USA entwickelt und wird heute durch Set Enterprises (Fountain Hills, Arizona) weltweit vertrieben. Auf dem Tisch liegen 12 Karten in einer regulären Auslage; alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über vier Eigenschaften: Menge (1, 2 oder 3 Symbole), Farbe (rot, violett, grün), Form (Raute, Balken, Welle) und Füllung (leer, halb, voll).
+
+Das langfristige Ziel ist eine Bildverarbeitungs-Pipeline, die aus einem Smartphone-Foto der Auslage automatisch das nächste gültige SET vorschlägt. Pattern Detection (Tags 6-10) hat die Kartenränder per Canny-Algorithmus lokalisiert. Der nächste Verarbeitungsschritt ist die Analyse der Symbole innerhalb jeder Karte: die Eigenschaft "Menge" ergibt sich direkt aus der Anzahl der segmentierten Objekte pro Karte; geometrische Messgrössen der isolierten Symbole liefern Hinweise auf Form und Füllung. Segmentierung ist die geeignete Methode, um diese Symbole vom weissen Kartenhintergrund zu trennen und als separate Objekte zugänglich zu machen.
+
+Persönliche Motivation: Ich verliere beim SET-Spielen regelmässig gegen meine Freundin und möchte das mit einem automatischen Hilfssystem ausgleichen.
+
+### Problemstellung
+
+Die Symbole auf SET-Karten (Raute, Balken, Welle; rot, violett, grün; leer, halb, voll gefüllt) sind auf einer weissen Kartenfläche gedruckt. Der Intensitätskontrast zwischen farbigen Symbolen und weissem Hintergrund ist der zentrale Anhaltspunkt für eine schwellenwertbasierte Segmentierung. Drei Schwierigkeiten treten in realen Smartphone-Aufnahmen auf:
+
+1. **Beleuchtungsvariation:** Glanzlichter auf glänzenden Kartenflächen können Symbole lokal aufhellen und den Kontrast zum Hintergrund reduzieren.
+2. **Halbgefüllte Symbole:** Symbole mit Füllung "halb" zeigen einen schraffierten Innenbereich, dessen Intensität zwischen dem Symbolrand und dem weissen Hintergrund liegt. Ein globaler Schwellenwert kann diesen Bereich falsch klassifizieren.
+3. **Karte-zu-Karte-Variation:** Helligkeit und Farbsättigung der Symbole variieren je nach Lichteinfall und Druckqualität zwischen einzelnen Karten.
+
+Die Segmentierung muss unter diesen Bedingungen die Symbole eines repräsentativen Kartenausschnitts zuverlässig vom Hintergrund trennen, sodass eine korrekte Symbolzählung und Objektmessung möglich ist.
+
+### Datendefinition, Quelle und Visualisierung
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in einer Anordnung mit 4 Zeilen und 3 Spalten auf einer dunkelgrünen Spielmatte.
+
+Als repräsentativer Bildausschnitt (Window) wird eine einzelne Karte aus dem oberen linken Bereich der Auslage gewählt (868 x 485 Pixel). Dieser Ausschnitt zeigt farbige Symbole auf weissem Hintergrund und repräsentiert eine typische, gut beleuchtete Spielsituation ohne starke Glanzlichter.
+
+Die Symbole besitzen folgende visuelle Charakteristika:
+- **Intensität:** farbige Symbole erscheinen deutlich dunkler als der weisse Kartenhintergrund; die Intensitätsdifferenz beträgt typischerweise 80-180 Graustufen.
+- **Kontrast:** hoher Farbkontrast auf RGB-Ebene zwischen gesättigten Symbolen (rot, violett, grün) und dem nahezu achromatischen weissen Hintergrund.
+- **Form:** kompakte, konvexe oder geschwungene Umrisse; Raute und Balken haben gerade Kanten, Welle zeigt eine geschwungene S-Kontur.
+- **Überlappung:** keine direkte Überlappung zwischen den Symbolen auf einer Karte; Symbole sind durch einen weissen Zwischenraum getrennt.
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from matplotlib.patches import Rectangle
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img = np.array(img_pil)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img.shape[:2]
+
+# Repräsentativer Kartenausschnitt: obere linke Karte (Koordinaten aus Helligkeitsprofil ermittelt)
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_crop = img[y0:y1, x0:x1]
+card_gray = img_gray[y0:y1, x0:x1]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+axes[0].imshow(img)
+rect = Rectangle(
+    (x0, y0), x1 - x0, y1 - y0, linewidth=2, edgecolor="yellow", facecolor="none"
+)
+axes[0].add_patch(rect)
+axes[0].set_title(f"IMG_6947.JPG | {W} x {H} Pixel | Analysebereich (gelb)")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+
+axes[1].imshow(card_crop)
+axes[1].set_title(f"Kartenausschnitt | {x1 - x0} x {y1 - y0} Pixel")
+axes[1].set_xlabel("x [Pixel, ausschnitt-relativ]")
+axes[1].set_ylabel("y [Pixel, ausschnitt-relativ]")
+
+axes[2].hist(
+    card_gray.ravel(), bins=64, range=(0, 255), color="steelblue", edgecolor="none"
+)
+axes[2].set_title("Grauwert-Histogramm | Kartenausschnitt")
+axes[2].set_xlabel("Intensität [0-255]")
+axes[2].set_ylabel("Anzahl Pixel")
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Ausschnitt: {x1 - x0} x {y1 - y0} Pixel "
+    f"| Intensitätsbereich: [{card_gray.min()}, {card_gray.max()}] "
+    f"| Mittelwert: {card_gray.mean():.1f}"
+)
+```
+
+**Beobachtungen:**
+
+Der Kartenausschnitt zeigt farbige Symbole auf überwiegend weissem Hintergrund. Das Grauwert-Histogramm zeigt eine klare Zweiteilung: eine dominante Häufung bei hohen Intensitätswerten (ca. 200-255, weisser Kartenhintergrund, ~72 % der Pixel) und ein breiteres Cluster im dunklen bis mittleren Bereich (ca. 50-150, Symbol- und Randpixel des Kartenausschnitts, ~22 % der Pixel). Der deutliche Intensitätsunterschied zwischen diesen Bereichen bestätigt, dass eine schwellenwertbasierte Trennung der Symbole vom Hintergrund prinzipiell möglich ist. Die genaue Lage des geeigneten Schwellenwerts wird in Tag 12 bestimmt.
+
+### Objektdefinition
+
+Ein Objekt entspricht einem einzelnen Symbol auf einer SET-Karte. Symbole sind kompakte, zusammenhängende Regionen (Connected Components), die sich durch ihre Intensität und Farbe vom weissen Kartenhintergrund abheben. Ein Symbol belegt typischerweise 5-20 % der Kartenfläche, besitzt eine klar definierte Aussenkontur und ist von anderen Symbolen auf derselben Karte durch einen weissen Zwischenraum getrennt.
+
+### Segmentierungsziel
+
+Das Ziel der Segmentierung ist die automatische Trennung der Symbole vom weissen Kartenhintergrund im gewählten Kartenausschnitt. Die Segmentierung soll:
+
+1. **Zählen:** Anzahl der isolierten Symbole bestimmen (Karteneigenschaft "Menge": 1, 2 oder 3).
+2. **Vermessen:** Geometrische Eigenschaften jedes Symbols extrahieren (z.B. Fläche, Umfang, Ausdehnung).
+3. **Vorbereiten:** Eine binäre Maske liefern, die als Grundlage für morphologische Operationen und die Skeletonization eines ausgewählten Symbols (Tag 13) dient.
+
+Die Segmentierung basiert ausschliesslich auf der Intensitäts- und Farbinformation des Bildausschnitts, ohne geometrisches Vorwissen über Symbolform oder -lage.
+
+## Tag 12 -- Methodisches Design
+
+Tag 12 legt das methodische Fundament für die Implementierung an Tag 13. Die folgenden Abschnitte begründen die Wahl der Schwellenwertmethode, der morphologischen Operationen, des Skeletonisierungsziels und der Objekteigenschaften. Abschliessend werden drei Konfigurationen (Baseline + 2 Variationen) definiert, die an Tag 14 quantitativ verglichen werden.
+
+### Schwellenwertmethode
+
+**Methode:** Otsu-Schwellenwert (globaler automatischer Threshold, `skimage.filters.threshold_otsu`).
+
+**Begründung:** Das Grauwert-Histogramm des Kartenausschnitts zeigt eine bimodale Verteilung (nachgewiesen an Tag 11): ein hohes Peak bei ca. 200-255 (weisser Hintergrund) und ein breiteres Cluster bei ca. 50-150 (Symbolpixel). Otsu minimiert die gewichtete Intra-Klassen-Varianz und findet automatisch den optimalen Trennwert zwischen den beiden Klassen -- ohne manuellen Parameter.
+
+Eine adaptive Schwellenwertmethode (lokale Fenster) wäre nur notwendig, wenn die Beleuchtung innerhalb des Kartenausschnitts stark variiert. Der gewählte Ausschnitt zeigt keine starken Glanzlichter, weshalb der globale Otsu-Wert ausreichend ist.
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from skimage.filters import threshold_otsu
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img_gray.shape
+
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_gray = img_gray[y0:y1, x0:x1]
+
+t_otsu = threshold_otsu(card_gray)
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(
+    card_gray.ravel(),
+    bins=64,
+    range=(0, 255),
+    color="steelblue",
+    edgecolor="none",
+    label="Histogramm",
+)
+ax.axvline(
+    t_otsu, color="crimson", linewidth=2, label=f"Otsu-Schwellenwert T = {t_otsu}"
+)
+ax.set_title("Grauwert-Histogramm | Kartenausschnitt | Otsu-Schwellenwert")
+ax.set_xlabel("Intensität [0-255]")
+ax.set_ylabel("Anzahl Pixel")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+pct_fg = (card_gray < t_otsu).mean() * 100
+pct_bg = (card_gray >= t_otsu).mean() * 100
+print(f"Otsu-Schwellenwert: T = {t_otsu}")
+print(f"Vordergrund (< T): {pct_fg:.1f}% | Hintergrund (>= T): {pct_bg:.1f}%")
+```
+
+### Morphologische Operationen
+
+Nach der Binarisierung enthält die binäre Maske zwei Arten von Artefakten:
+
+1. **Rauschen (kleine isolierte Vordergrundpixel):** JPEG-Kompressionsartefakte und feine Drucktexturen erzeugen vereinzelte Pixel, die irrtümlicherweise als Vordergrund klassifiziert werden.
+2. **Löcher in Symbolen:** Symbole mit Füllung "halb" besitzen einen schraffierten Innenbereich, dessen Intensität nahe dem Schwellenwert liegt. Einzelne Innenpixel können als Hintergrund klassifiziert werden.
+
+**Verarbeitungssequenz:**
+
+1. **Opening** (Erosion gefolgt von Dilation, Disk-Kernel Radius r): entfernt kleine Rauschpixel ohne die Symbolränder stark zu verändern. Ein Disk-Kernel bewahrt runde Konturformen besser als ein quadratischer Kernel.
+2. **Filterung nach Mindestfläche** (`min_area_px`): entfernt verbleibende Kleinstkomponenten nach dem Opening.
+3. **Closing** (Dilation gefolgt von Erosion, Disk-Kernel Radius r): schliesst kleine Lücken innerhalb der Symbolregionen; relevant für "halb"-gefüllte Symbole.
+
+Kernel-Radius und die Entscheidung, ob Closing angewendet wird, sind die zwei variablen Parameter in den Konfigurationen.
+
+```{python}
+from skimage.morphology import disk
+
+fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+for ax, r in zip(axes, [1, 2, 3]):
+    selem = disk(r)
+    ax.imshow(selem, cmap="gray_r", vmin=0, vmax=1)
+    ax.set_title(
+        f"Disk-Kernel | Radius r = {r}\n" f"({selem.shape[0]} x {selem.shape[1]} Pixel)"
+    )
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Strukturierende Elemente für Opening / Closing", y=1.05)
+plt.tight_layout()
+plt.show()
+```
+
+### Skeletonisierung
+
+**Methode:** `skimage.morphology.skeletonize` (thinning-basierter Algorithmus, liefert einen 1-Pixel breiten Skelettgraph).
+
+**Zielobjekt:** Die grösste Connected Component im Kartenausschnitt (maximale Pixelfläche nach morphologischer Bereinigung). Diese Wahl garantiert, dass ein vollständiges Symbol skeletonisiert wird und kein Rauschfragment oder Randausschnitt. Die Auswahl erfolgt automatisch über `skimage.measure.regionprops` nach der Labelisierung.
+
+**Metrik:** Skeleton Pixel Count -- die Gesamtzahl der Vordergrundpixel im Skelettbild -- dient als Mass für die Konturkomplexität des Symbols. Ein Balken hat ein einfaches, lineares Skelett (wenige Pixel); eine Welle ein gewundenes Skelett (mehr Pixel). Diese Metrik wird in Tag 14 für den Konfigurationsvergleich herangezogen.
+
+### Objekteigenschaften
+
+Drei geometrische Eigenschaften werden pro Connected Component extrahiert (`skimage.measure.regionprops`):
+
+| Eigenschaft | Scikit-image Attribut | Einheit | Relevanz für SET |
+|---|---|---|---|
+| Fläche | `area` | px² | Symbolanzahl: grössere Symbole bei 1x-Karten als bei 3x |
+| Umfang | `perimeter` | px | Formkomplexität: Welle > Raute > Balken |
+| Exzentrizität | `eccentricity` | dimensionslos [0, 1] | Elongiertheit: Balken/Welle hoch, Raute mittel |
+
+Exzentrizität = 0 entspricht einem Kreis, Exzentrizität = 1 einer Linie. Die Kombination von Fläche und Exzentrizität kann Symbole voneinander unterscheiden und ist ein erster Schritt zur Formklassifikation.
+
+### Schlüsselparameter
+
+| Parameter | Bedeutung | Getestete Werte |
+|---|---|---|
+| `kernel_size` | Radius des Disk-Kernels für Opening (und Closing) | 1, 2, 3 |
+| `use_closing` | Closing-Schritt nach Opening und Filterung | True / False |
+| `min_area_px` | Minimale Pixelfläche einer gültigen Connected Component | 200, 500 |
+
+### Konfigurationsübersicht
+
+| Konfiguration | `kernel_size` | `use_closing` | `min_area_px` | Rationale |
+|---|---|---|---|---|
+| Baseline    | 2 | False | 500 | Otsu + leichtes Opening; kein Closing; konservative Mindestfläche |
+| Variation 1 | 2 | True  | 500 | wie Baseline + Closing; verbessert "halb"-Symbole |
+| Variation 2 | 3 | True  | 200 | grösserer Kernel; kleineres min_area; robuster bei schwachen Symbolen |
+
+```{python}
+configs = [
+    {"name": "Baseline", "kernel_size": 2, "use_closing": False, "min_area_px": 500},
+    {"name": "Variation 1", "kernel_size": 2, "use_closing": True, "min_area_px": 500},
+    {"name": "Variation 2", "kernel_size": 3, "use_closing": True, "min_area_px": 200},
+]
+
+print(
+    f"{'Konfiguration':<14} {'kernel_size':>12} {'use_closing':>12} {'min_area_px':>12}"
+)
+print("-" * 52)
+for c in configs:
+    print(
+        f"{c['name']:<14} {c['kernel_size']:>12} {str(c['use_closing']):>12} {c['min_area_px']:>12}"
+    )
+```
+
+## Tag 13 -- Technische Implementierung
+
+Tag 13 implementiert die in Tag 12 definierte Segmentierungspipeline vollständig und nachvollziehbar für alle drei Konfigurationen. Jeder Schritt wird mit Zwischenresultaten visualisiert. Die Verarbeitungssequenz ist: (1) Otsu-Binarisierung, (2) Opening, (3) Mindestflächen-Filter, (4) optionales Closing, (5) Connected Components & Objekteigenschaften, (6) Skeletonisierung des grössten Objekts. Keine quantitative Evaluation oder Interpretation -- diese folgen an Tag 14 und 15.
+
+### Schritt 0: Setup & Daten
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from skimage.filters import threshold_otsu
+from skimage.morphology import disk, opening, closing, skeletonize
+from skimage.measure import label, regionprops
+from skimage.color import label2rgb
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img = np.array(img_pil)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img_gray.shape
+
+# Kartenausschnitt (obere linke Karte, identisch mit Tag 11/12)
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_crop = img[y0:y1, x0:x1]
+card_gray = img_gray[y0:y1, x0:x1]
+
+configs = [
+    {"name": "Baseline", "kernel_size": 2, "use_closing": False, "min_area_px": 500},
+    {"name": "Variation 1", "kernel_size": 2, "use_closing": True, "min_area_px": 500},
+    {"name": "Variation 2", "kernel_size": 3, "use_closing": True, "min_area_px": 200},
+]
+
+print(f"Kartenausschnitt: {card_gray.shape[1]} x {card_gray.shape[0]} Pixel")
+print(
+    f"Intensitätsbereich: [{card_gray.min()}, {card_gray.max()}] | Mittelwert: {card_gray.mean():.1f}"
+)
+print()
+print(
+    f"{'Konfiguration':<14} {'kernel_size':>12} {'use_closing':>12} {'min_area_px':>12}"
+)
+print("-" * 52)
+for c in configs:
+    print(
+        f"{c['name']:<14} {c['kernel_size']:>12} {str(c['use_closing']):>12} {c['min_area_px']:>12}"
+    )
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+axes[0].imshow(card_crop)
+axes[0].set_title(
+    f"Kartenausschnitt (Farbe) | {card_gray.shape[1]} x {card_gray.shape[0]} Pixel"
+)
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(card_gray, cmap="gray")
+axes[1].set_title("Kartenausschnitt (Graustufen)")
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+```
+
+### Schritt 1: Binarisierung (Otsu-Schwellenwert)
+
+```{python}
+t_otsu = threshold_otsu(card_gray)
+mask_raw = card_gray < t_otsu
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+axes[0].imshow(card_gray, cmap="gray")
+axes[0].set_title("Eingabe: Graustufenbild")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(mask_raw, cmap="gray")
+axes[1].set_title(
+    f"Otsu-Maske | T = {t_otsu} | Vordergrund: {mask_raw.mean()*100:.1f}%"
+)
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(f"Otsu-Schwellenwert: T = {t_otsu}")
+print(f"Vordergrundpixel: {mask_raw.sum()} ({mask_raw.mean()*100:.1f}%)")
+```
+
+### Schritte 2-4: Morphologische Bereinigung
+
+```{python}
+def apply_pipeline(
+    mask, kernel_size, use_closing, min_area_px, return_intermediate=False
+):
+    selem = disk(kernel_size)
+
+    # Schritt 2: Opening
+    mask_opened = opening(mask, selem)
+
+    # Schritt 3: Mindestflächen-Filter
+    lbl_tmp = label(mask_opened)
+    mask_filtered = np.zeros_like(mask_opened)
+    for p in regionprops(lbl_tmp):
+        if p.area >= min_area_px:
+            mask_filtered[lbl_tmp == p.label] = True
+
+    # Schritt 4: Optionales Closing
+    mask_final = closing(mask_filtered, selem) if use_closing else mask_filtered
+
+    if return_intermediate:
+        return mask_opened, mask_filtered, mask_final
+    return mask_final
+
+
+# Zwischenresultate für Baseline (Traceability)
+cfg0 = configs[0]
+m_opened, m_filtered, m_final_b = apply_pipeline(
+    mask_raw,
+    cfg0["kernel_size"],
+    cfg0["use_closing"],
+    cfg0["min_area_px"],
+    return_intermediate=True,
+)
+
+fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+data = [
+    (mask_raw, f"Schritt 1: Otsu\nT = {t_otsu}"),
+    (m_opened, f"Schritt 2: Opening\ndisk r = {cfg0['kernel_size']}"),
+    (m_filtered, f"Schritt 3: min_area Filter\n>= {cfg0['min_area_px']} px²"),
+    (m_final_b, f"Schritt 4: Closing\n(nicht angewendet)"),
+]
+for ax, (mask, title) in zip(axes, data):
+    ax.imshow(mask, cmap="gray")
+    ax.set_title(title)
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle(
+    f"Baseline: kernel_size={cfg0['kernel_size']}, "
+    f"use_closing={cfg0['use_closing']}, min_area_px={cfg0['min_area_px']}",
+    y=1.02,
+)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Alle drei Konfigurationen ausfuehren
+final_masks = [
+    apply_pipeline(mask_raw, c["kernel_size"], c["use_closing"], c["min_area_px"])
+    for c in configs
+]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, cfg, m in zip(axes, configs, final_masks):
+    ax.imshow(m, cmap="gray")
+    ax.set_title(
+        f"{cfg['name']}\n"
+        f"kernel={cfg['kernel_size']}, closing={cfg['use_closing']}, min_area={cfg['min_area_px']}"
+    )
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Finale binäre Masken -- alle Konfigurationen", y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+### Schritt 5: Connected Components & Objektzählung
+
+```{python}
+labeled_masks = [label(m) for m in final_masks]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, cfg, lbl in zip(axes, configs, labeled_masks):
+    ax.imshow(label2rgb(lbl, bg_label=0))
+    ax.set_title(f"{cfg['name']} | {lbl.max()} Objekt(e)")
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Connected Components (jedes Objekt in eigener Farbe)", y=1.02)
+plt.tight_layout()
+plt.show()
+
+print("Objektzählung:")
+for cfg, lbl in zip(configs, labeled_masks):
+    print(f"  {cfg['name']}: {lbl.max()} Objekt(e)")
+```
+
+### Schritt 6: Objekteigenschaften (Fläche, Umfang, Exzentrizität)
+
+```{python}
+import matplotlib.patches as mpatches
+
+# Tabelle: Objekteigenschaften pro Konfiguration
+for cfg, lbl in zip(configs, labeled_masks):
+    props = regionprops(lbl)
+    print(f"--- {cfg['name']} ---")
+    print(
+        f"{'Objekt':>8} {'Flaeche [px\u00b2]':>16} {'Umfang [px]':>12} {'Exzentrizität':>16}"
+    )
+    print("-" * 56)
+    for p in props:
+        print(
+            f"{p.label:>8} {p.area:>16.0f} {p.perimeter:>12.1f} {p.eccentricity:>16.3f}"
+        )
+    print()
+
+# Visualisierung: Bounding Boxes der erkannten Objekte auf dem Graustufenbild
+_colors = ["crimson", "gold", "limegreen", "royalblue", "darkorange"]
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+for ax, cfg, lbl in zip(axes, configs, labeled_masks):
+    ax.imshow(card_gray, cmap="gray")
+    for i, p in enumerate(regionprops(lbl)):
+        y_min, x_min, y_max, x_max = p.bbox
+        ax.add_patch(
+            mpatches.Rectangle(
+                (x_min, y_min),
+                x_max - x_min,
+                y_max - y_min,
+                linewidth=1.5,
+                edgecolor=_colors[i % len(_colors)],
+                facecolor="none",
+            )
+        )
+        ax.text(
+            x_min + 2,
+            y_min + 2,
+            f"A={p.area:.0f}\ne={p.eccentricity:.2f}",
+            color=_colors[i % len(_colors)],
+            fontsize=6.5,
+            va="top",
+            linespacing=1.3,
+        )
+    ax.set_title(f"{cfg['name']} | {lbl.max()} Objekt(e)")
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle(
+    "Erkannte Objekte: Bounding Box, Fläche [px\u00b2] und Exzentrizität", y=1.02
+)
+plt.tight_layout()
+plt.show()
+```
+
+### Schritt 7: Skeletonisierung des grössten Symbols
+
+Der Kartenausschnitt enthält neben den eigentlichen Symbolen eine grossflächige Randregion (Kartenborde + Spielmatte), die durch den dunklen Hintergrund ebenfalls als Vordergrund klassifiziert wird. Diese Randkomponente belegt typischerweise ca. 13 % der Ausschnittsfläche, während die eigentlichen Symbole ca. 1–3 % belegen. Eine Obergrenze von 10 % der Ausschnittsfläche trennt beide Gruppen zuverlässig: Komponenten oberhalb dieser Grenze werden als Artefakt ausgeschlossen; die grösste verbleibende Komponente entspricht dem Symbol mit der grössten Ausdehnung. Die quantitative Bewertung des Skeleton Pixel Count erfolgt an Tag†14.
+
+```{python}
+card_area = card_gray.size  # Gesamtpixelanzahl des Kartenausschnitts
+max_symbol_area = 0.10 * card_area  # Grenzwert: Symbole < 10 % (Randkomponente > 13 %)
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+skel_counts = {}
+
+for ax, cfg, lbl in zip(axes, configs, labeled_masks):
+    props = regionprops(lbl)
+    symbols = [p for p in props if p.area < max_symbol_area]
+
+    if not symbols:
+        ax.set_title(f"{cfg['name']}\nKein Symbol gefunden")
+        skel_counts[cfg["name"]] = 0
+        continue
+
+    target = max(symbols, key=lambda p: p.area)  # grösstes Symbol
+    obj_mask = lbl == target.label
+    skeleton = skeletonize(obj_mask)
+    skel_count = int(skeleton.sum())
+    skel_counts[cfg["name"]] = skel_count
+
+    overlay = np.zeros((*obj_mask.shape, 3), dtype=float)
+    overlay[obj_mask] = [0.25, 0.45, 0.85]
+    overlay[skeleton] = [0.95, 0.25, 0.15]
+
+    ax.imshow(overlay)
+    ax.set_title(
+        f"{cfg['name']}\n"
+        f"Symbol: {target.area:.0f} px² | Skelett: {skel_count} Pixel"
+    )
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+
+plt.suptitle(
+    "Skeletonisierung des grössten Symbols (rot = Skelett, blau = Symbol)\n"
+    f"Auswahlgrenze: Fläche < {max_symbol_area:.0f} px² (10 % der Ausschnittsfläche)",
+    y=1.04,
+)
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Kartenausschnittsfläche: {card_area} px² | Symbolgrenze: < {max_symbol_area:.0f} px²"
+)
+print("Skeleton Pixel Count:")
+for name, count in skel_counts.items():
+    print(f"  {name}: {count} Pixel")
+```
+
+## Tag 14 -- Evaluation
+
+Tag 14 bewertet die Segmentierungsergebnisse aus Tag 13 quantitativ. Ein Segmentierungsmass wird konsistent über alle drei Konfigurationen angewendet. Zusätzlich werden deskriptive Statistiken der Objekteigenschaften (Fläche, Umfang, Exzentrizität) pro Konfiguration berechnet und direkt mit der Baseline verglichen. Keine neue Implementierung und keine inhaltliche Interpretation -- diese folgen an Tag 15.
+
+### Setup: Pipeline-Wiederherstellung
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from PIL import Image
+from skimage.filters import threshold_otsu
+from skimage.morphology import disk, opening, closing
+from skimage.measure import label, regionprops
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img_gray.shape
+
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_gray = img_gray[y0:y1, x0:x1]
+card_area = card_gray.size
+max_symbol_area = 0.10 * card_area  # Symbole < 10 % der Ausschnittsfläche
+
+configs = [
+    {"name": "Baseline", "kernel_size": 2, "use_closing": False, "min_area_px": 500},
+    {"name": "Variation 1", "kernel_size": 2, "use_closing": True, "min_area_px": 500},
+    {"name": "Variation 2", "kernel_size": 3, "use_closing": True, "min_area_px": 200},
+]
+
+t_otsu = threshold_otsu(card_gray)
+mask_raw = card_gray < t_otsu
+
+
+def apply_pipeline(mask, kernel_size, use_closing, min_area_px):
+    selem = disk(kernel_size)
+    m = opening(mask, selem)
+    lbl_tmp = label(m)
+    filtered = np.zeros_like(m)
+    for p in regionprops(lbl_tmp):
+        if p.area >= min_area_px:
+            filtered[lbl_tmp == p.label] = True
+    return closing(filtered, selem) if use_closing else filtered
+
+
+final_masks = [
+    apply_pipeline(mask_raw, c["kernel_size"], c["use_closing"], c["min_area_px"])
+    for c in configs
+]
+labeled_masks = [label(m) for m in final_masks]
+
+print(
+    f"Kartenausschnitt: {card_gray.shape[1]} x {card_gray.shape[0]} px | "
+    f"Otsu T = {t_otsu} | Symbolgrenze < {max_symbol_area:.0f} px\u00b2"
+)
+print(f"Konfigurationen: {[c['name'] for c in configs]}")
+```
+
+### Segmentierungsmass: Dice-Koeffizient
+
+**Definition:** Dice(A, B) = 2 \u00b7 |A \u2229 B| / (|A| + |B|), mit A, B als binäre Masken. Wertebereich [0, 1]; 1 = vollständige Überlappung.
+
+**Begründung:** Da keine manuell annotierte Ground-Truth-Maske vorliegt, dient die Baseline-Maske als Referenz. Der Dice-Koeffizient quantifiziert direkt, wie stark eine Parametervariante die Segmentierungsentscheidungen gegenüber der Baseline verändert. Er ist normiert, symmetrisch und in der Bildverarbeitungsliteratur etabliert. Im SET-Anwendungsfall ist ein Dice nahe 1 erwünscht, wenn die Variationen nur gezielte Korrekturen bewirken; ein deutlich niedrigerer Dice würde auf substantielle Unterschiede bei der Symbolisolation hinweisen.
+
+```{python}
+def dice(a, b):
+    return 2 * (a & b).sum() / (a.sum() + b.sum())
+
+
+baseline = final_masks[0]
+dice_vals = [dice(baseline, m) for m in final_masks]
+
+print(
+    f"{'Konfiguration':<14} {'Dice vs. Baseline':>18} {'\u0394Dice':>10} "
+    f"{'Vordergrund [px\u00b2]':>20} {'\u0394 Vordergrund [px\u00b2]':>22}"
+)
+print("-" * 86)
+base_fg = baseline.sum()
+for cfg, d, m in zip(configs, dice_vals, final_masks):
+    fg = m.sum()
+    delta_d = d - dice_vals[0]
+    delta_fg = int(fg) - int(base_fg)
+    delta_d_str = f"{delta_d:+.4f}" if delta_d != 0 else "--"
+    delta_fg_str = f"{delta_fg:+d}" if delta_fg != 0 else "--"
+    print(
+        f"{cfg['name']:<14} {d:>18.4f} {delta_d_str:>10} {int(fg):>20} {delta_fg_str:>22}"
+    )
+```
+
+```{python}
+# Masken-Überlappungskarte: Baseline als Referenz
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, cfg, m, d in zip(axes, configs, final_masks, dice_vals):
+    only_base = baseline & ~m
+    only_var = ~baseline & m
+    agree = baseline & m
+
+    overlay = np.zeros((*m.shape, 3), dtype=float)
+    overlay[agree] = [0.25, 0.45, 0.85]  # blau: Übereinstimmung
+    overlay[only_base] = [0.95, 0.25, 0.15]  # rot: nur Baseline
+    overlay[only_var] = [0.15, 0.75, 0.25]  # grün: nur Variation
+
+    ax.imshow(overlay)
+    ax.set_title(
+        f"{cfg['name']} | Dice = {d:.4f}\n"
+        f"nur Baseline: {only_base.sum():,} px\u00b2 | "
+        f"nur Variation: {only_var.sum():,} px\u00b2"
+    )
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+
+legend_handles = [
+    mpatches.Patch(color=[0.25, 0.45, 0.85], label="Übereinstimmung (beide)"),
+    mpatches.Patch(color=[0.95, 0.25, 0.15], label="nur Baseline"),
+    mpatches.Patch(color=[0.15, 0.75, 0.25], label="nur Variation"),
+]
+axes[2].legend(handles=legend_handles, loc="lower right", fontsize=8)
+plt.suptitle("Masken-Überlappungskarte: Dice-Koeffizient vs. Baseline", y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+### Deskriptive Statistiken der Objekteigenschaften
+
+Als Symbolkandidaten gelten alle Connected Components nach morphologischer Bereinigung mit Fläche < 10 % der Ausschnittsfläche (< 41 963 px\u00b2), identisch zur Auswahlgrenze aus Tag 13. Für jede Konfiguration werden Mittelwert (\u03bc), Standardabweichung (\u03c3), Minimum und Maximum der drei Objekteigenschaften Fläche, Umfang und Exzentrizität berichtet. Differenzwerte (\u0394) beziehen sich auf die Baseline.
+
+```{python}
+stats = {}
+for cfg, lbl in zip(configs, labeled_masks):
+    props = regionprops(lbl)
+    cands = [p for p in props if p.area < max_symbol_area]
+    areas = np.array([p.area for p in cands], dtype=float)
+    perims = np.array([p.perimeter for p in cands], dtype=float)
+    eccs = np.array([p.eccentricity for p in cands], dtype=float)
+    stats[cfg["name"]] = {
+        "n": len(cands),
+        "area": areas,
+        "perim": perims,
+        "ecc": eccs,
+    }
+
+# Tabelle: Mittelwert ± Standardabweichung + Delta vs. Baseline
+base_s = stats["Baseline"]
+print(
+    f"{'Konfiguration':<14} {'N':>4} "
+    f"{'Fl\u00e4che \u03bc [px\u00b2]':>16} {'\u03c3':>8} {'\u0394\u03bc':>8} "
+    f"{'Umfang \u03bc [px]':>14} {'\u03c3':>8} {'\u0394\u03bc':>8} "
+    f"{'Exz. \u03bc':>10} {'\u03c3':>7} {'\u0394\u03bc':>8}"
+)
+print("-" * 115)
+for name, s in stats.items():
+    da = np.mean(s["area"]) - np.mean(base_s["area"])
+    dp = np.mean(s["perim"]) - np.mean(base_s["perim"])
+    de = np.mean(s["ecc"]) - np.mean(base_s["ecc"])
+    da_s = f"{da:+.0f}" if da != 0 else "--"
+    dp_s = f"{dp:+.1f}" if dp != 0 else "--"
+    de_s = f"{de:+.3f}" if de != 0 else "--"
+    print(
+        f"{name:<14} {s['n']:>4} "
+        f"{np.mean(s['area']):>16.0f} {np.std(s['area']):>8.0f} {da_s:>8} "
+        f"{np.mean(s['perim']):>14.1f} {np.std(s['perim']):>8.1f} {dp_s:>8} "
+        f"{np.mean(s['ecc']):>10.3f} {np.std(s['ecc']):>7.3f} {de_s:>8}"
+    )
+print()
+print("Wertebereich pro Eigenschaft und Konfiguration:")
+for name, s in stats.items():
+    print(
+        f"  {name}: "
+        f"Fl\u00e4che [{s['area'].min():.0f}, {s['area'].max():.0f}] px\u00b2 | "
+        f"Umfang [{s['perim'].min():.1f}, {s['perim'].max():.1f}] px | "
+        f"Exz. [{s['ecc'].min():.3f}, {s['ecc'].max():.3f}]"
+    )
+```
+
+```{python}
+props_labels = ["Fl\u00e4che [px\u00b2]", "Umfang [px]", "Exzentrizit\u00e4t"]
+prop_keys = ["area", "perim", "ecc"]
+cfg_names = [c["name"] for c in configs]
+x = np.arange(len(cfg_names))
+bar_colors = ["#3a7abf", "#e05a3a", "#4db37a"]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, key, label_str in zip(axes, prop_keys, props_labels):
+    means = [np.mean(stats[n][key]) for n in cfg_names]
+    stds = [np.std(stats[n][key]) for n in cfg_names]
+    bars = ax.bar(
+        x,
+        means,
+        yerr=stds,
+        capsize=5,
+        color=bar_colors,
+        edgecolor="white",
+        linewidth=0.8,
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(cfg_names, fontsize=9)
+    ax.set_ylabel(label_str)
+    ax.set_title(f"\u03bc \u00b1 \u03c3 | {label_str}")
+    ax.grid(True, axis="y", alpha=0.3)
+    for bar, mean in zip(bars, means):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(stds) * 0.05,
+            f"{mean:.1f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+plt.suptitle(
+    "Deskriptive Statistiken der Symbolkandidaten (Fläche < 41\u202f963 px\u00b2)\n"
+    "Balken = Mittelwert, Fehlerbalken = Standardabweichung",
+    y=1.04,
+)
+plt.tight_layout()
+plt.show()
+```
+
+## Tag 15 -- Analyse & Kommunikation
+
+*Wird an Tag 15 vervollständigt.*
+
+### Abschlussreflexion MC
+
+*Wird an Tag 15 vervollständigt.*
+
+### Revisionen
+
+<span style="background-color: #fff3b0;"><strong>Template für Revisionen:</strong> [Änderungen werden hier eingetragen...]</span>
+

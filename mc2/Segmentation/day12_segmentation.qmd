@@ -1,0 +1,283 @@
+---
+title: GBSV MC2 -- Segmentation
+author: Luca Manna
+date: '2026-05-12'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Segmentation
+
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 11 -- Daten & Domäne
+
+### Anwendungsfall
+
+Das Kartenspiel SET wurde 1974 von Marsha Falco in den USA entwickelt und wird heute durch Set Enterprises (Fountain Hills, Arizona) weltweit vertrieben. Auf dem Tisch liegen 12 Karten in einer regulären Auslage; alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über vier Eigenschaften: Menge (1, 2 oder 3 Symbole), Farbe (rot, violett, grün), Form (Raute, Balken, Welle) und Füllung (leer, halb, voll).
+
+Das langfristige Ziel ist eine Bildverarbeitungs-Pipeline, die aus einem Smartphone-Foto der Auslage automatisch das nächste gültige SET vorschlägt. Pattern Detection (Tags 6-10) hat die Kartenränder per Canny-Algorithmus lokalisiert. Der nächste Verarbeitungsschritt ist die Analyse der Symbole innerhalb jeder Karte: die Eigenschaft "Menge" ergibt sich direkt aus der Anzahl der segmentierten Objekte pro Karte; geometrische Messgrössen der isolierten Symbole liefern Hinweise auf Form und Füllung. Segmentierung ist die geeignete Methode, um diese Symbole vom weissen Kartenhintergrund zu trennen und als separate Objekte zugänglich zu machen.
+
+Persönliche Motivation: Ich verliere beim SET-Spielen regelmässig gegen meine Freundin und möchte das mit einem automatischen Hilfssystem ausgleichen.
+
+### Problemstellung
+
+Die Symbole auf SET-Karten (Raute, Balken, Welle; rot, violett, grün; leer, halb, voll gefüllt) sind auf einer weissen Kartenfläche gedruckt. Der Intensitätskontrast zwischen farbigen Symbolen und weissem Hintergrund ist der zentrale Anhaltspunkt für eine schwellenwertbasierte Segmentierung. Drei Schwierigkeiten treten in realen Smartphone-Aufnahmen auf:
+
+1. **Beleuchtungsvariation:** Glanzlichter auf glänzenden Kartenflächen können Symbole lokal aufhellen und den Kontrast zum Hintergrund reduzieren.
+2. **Halbgefüllte Symbole:** Symbole mit Füllung "halb" zeigen einen schraffierten Innenbereich, dessen Intensität zwischen dem Symbolrand und dem weissen Hintergrund liegt. Ein globaler Schwellenwert kann diesen Bereich falsch klassifizieren.
+3. **Karte-zu-Karte-Variation:** Helligkeit und Farbsättigung der Symbole variieren je nach Lichteinfall und Druckqualität zwischen einzelnen Karten.
+
+Die Segmentierung muss unter diesen Bedingungen die Symbole eines repräsentativen Kartenausschnitts zuverlässig vom Hintergrund trennen, sodass eine korrekte Symbolzählung und Objektmessung möglich ist.
+
+### Datendefinition, Quelle und Visualisierung
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in einer Anordnung mit 4 Zeilen und 3 Spalten auf einer dunkelgrünen Spielmatte.
+
+Als repräsentativer Bildausschnitt (Window) wird eine einzelne Karte aus dem oberen linken Bereich der Auslage gewählt (868 x 485 Pixel). Dieser Ausschnitt zeigt farbige Symbole auf weissem Hintergrund und repräsentiert eine typische, gut beleuchtete Spielsituation ohne starke Glanzlichter.
+
+Die Symbole besitzen folgende visuelle Charakteristika:
+- **Intensität:** farbige Symbole erscheinen deutlich dunkler als der weisse Kartenhintergrund; die Intensitätsdifferenz beträgt typischerweise 80-180 Graustufen.
+- **Kontrast:** hoher Farbkontrast auf RGB-Ebene zwischen gesättigten Symbolen (rot, violett, grün) und dem nahezu achromatischen weissen Hintergrund.
+- **Form:** kompakte, konvexe oder geschwungene Umrisse; Raute und Balken haben gerade Kanten, Welle zeigt eine geschwungene S-Kontur.
+- **Überlappung:** keine direkte Überlappung zwischen den Symbolen auf einer Karte; Symbole sind durch einen weissen Zwischenraum getrennt.
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from matplotlib.patches import Rectangle
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img = np.array(img_pil)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img.shape[:2]
+
+# Repräsentativer Kartenausschnitt: obere linke Karte (Koordinaten aus Helligkeitsprofil ermittelt)
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_crop = img[y0:y1, x0:x1]
+card_gray = img_gray[y0:y1, x0:x1]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+axes[0].imshow(img)
+rect = Rectangle(
+    (x0, y0), x1 - x0, y1 - y0, linewidth=2, edgecolor="yellow", facecolor="none"
+)
+axes[0].add_patch(rect)
+axes[0].set_title(f"IMG_6947.JPG | {W} x {H} Pixel | Analysebereich (gelb)")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+
+axes[1].imshow(card_crop)
+axes[1].set_title(f"Kartenausschnitt | {x1 - x0} x {y1 - y0} Pixel")
+axes[1].set_xlabel("x [Pixel, ausschnitt-relativ]")
+axes[1].set_ylabel("y [Pixel, ausschnitt-relativ]")
+
+axes[2].hist(
+    card_gray.ravel(), bins=64, range=(0, 255), color="steelblue", edgecolor="none"
+)
+axes[2].set_title("Grauwert-Histogramm | Kartenausschnitt")
+axes[2].set_xlabel("Intensität [0-255]")
+axes[2].set_ylabel("Anzahl Pixel")
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Ausschnitt: {x1 - x0} x {y1 - y0} Pixel "
+    f"| Intensitätsbereich: [{card_gray.min()}, {card_gray.max()}] "
+    f"| Mittelwert: {card_gray.mean():.1f}"
+)
+```
+
+**Beobachtungen:**
+
+Der Kartenausschnitt zeigt farbige Symbole auf überwiegend weissem Hintergrund. Das Grauwert-Histogramm zeigt eine klare Zweiteilung: eine dominante Häufung bei hohen Intensitätswerten (ca. 200-255, weisser Kartenhintergrund, ~72 % der Pixel) und ein breiteres Cluster im dunklen bis mittleren Bereich (ca. 50-150, Symbol- und Randpixel des Kartenausschnitts, ~22 % der Pixel). Der deutliche Intensitätsunterschied zwischen diesen Bereichen bestätigt, dass eine schwellenwertbasierte Trennung der Symbole vom Hintergrund prinzipiell möglich ist. Die genaue Lage des geeigneten Schwellenwerts wird in Tag 12 bestimmt.
+
+### Objektdefinition
+
+Ein Objekt entspricht einem einzelnen Symbol auf einer SET-Karte. Symbole sind kompakte, zusammenhängende Regionen (Connected Components), die sich durch ihre Intensität und Farbe vom weissen Kartenhintergrund abheben. Ein Symbol belegt typischerweise 5-20 % der Kartenfläche, besitzt eine klar definierte Aussenkontur und ist von anderen Symbolen auf derselben Karte durch einen weissen Zwischenraum getrennt.
+
+### Segmentierungsziel
+
+Das Ziel der Segmentierung ist die automatische Trennung der Symbole vom weissen Kartenhintergrund im gewählten Kartenausschnitt. Die Segmentierung soll:
+
+1. **Zählen:** Anzahl der isolierten Symbole bestimmen (Karteneigenschaft "Menge": 1, 2 oder 3).
+2. **Vermessen:** Geometrische Eigenschaften jedes Symbols extrahieren (z.B. Fläche, Umfang, Ausdehnung).
+3. **Vorbereiten:** Eine binäre Maske liefern, die als Grundlage für morphologische Operationen und die Skeletonization eines ausgewählten Symbols (Tag 13) dient.
+
+Die Segmentierung basiert ausschliesslich auf der Intensitäts- und Farbinformation des Bildausschnitts, ohne geometrisches Vorwissen über Symbolform oder -lage.
+
+## Tag 12 -- Methodisches Design
+
+Tag 12 legt das methodische Fundament für die Implementierung an Tag 13. Die folgenden Abschnitte begründen die Wahl der Schwellenwertmethode, der morphologischen Operationen, des Skeletonisierungsziels und der Objekteigenschaften. Abschliessend werden drei Konfigurationen (Baseline + 2 Variationen) definiert, die an Tag 14 quantitativ verglichen werden.
+
+### Schwellenwertmethode
+
+**Methode:** Otsu-Schwellenwert (globaler automatischer Threshold, `skimage.filters.threshold_otsu`).
+
+**Begründung:** Das Grauwert-Histogramm des Kartenausschnitts zeigt eine bimodale Verteilung (nachgewiesen an Tag 11): ein hohes Peak bei ca. 200-255 (weisser Hintergrund) und ein breiteres Cluster bei ca. 50-150 (Symbolpixel). Otsu minimiert die gewichtete Intra-Klassen-Varianz und findet automatisch den optimalen Trennwert zwischen den beiden Klassen -- ohne manuellen Parameter.
+
+Eine adaptive Schwellenwertmethode (lokale Fenster) wäre nur notwendig, wenn die Beleuchtung innerhalb des Kartenausschnitts stark variiert. Der gewählte Ausschnitt zeigt keine starken Glanzlichter, weshalb der globale Otsu-Wert ausreichend ist.
+
+```{python}
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from skimage.filters import threshold_otsu
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img_gray.shape
+
+y0, y1 = int(0.074 * H), int(0.234 * H)
+x0, x1 = int(0.173 * W), int(0.388 * W)
+card_gray = img_gray[y0:y1, x0:x1]
+
+t_otsu = threshold_otsu(card_gray)
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(
+    card_gray.ravel(),
+    bins=64,
+    range=(0, 255),
+    color="steelblue",
+    edgecolor="none",
+    label="Histogramm",
+)
+ax.axvline(
+    t_otsu, color="crimson", linewidth=2, label=f"Otsu-Schwellenwert T = {t_otsu}"
+)
+ax.set_title("Grauwert-Histogramm | Kartenausschnitt | Otsu-Schwellenwert")
+ax.set_xlabel("Intensität [0-255]")
+ax.set_ylabel("Anzahl Pixel")
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+pct_fg = (card_gray < t_otsu).mean() * 100
+pct_bg = (card_gray >= t_otsu).mean() * 100
+print(f"Otsu-Schwellenwert: T = {t_otsu}")
+print(f"Vordergrund (< T): {pct_fg:.1f}% | Hintergrund (>= T): {pct_bg:.1f}%")
+```
+
+### Morphologische Operationen
+
+Nach der Binarisierung enthält die binäre Maske zwei Arten von Artefakten:
+
+1. **Rauschen (kleine isolierte Vordergrundpixel):** JPEG-Kompressionsartefakte und feine Drucktexturen erzeugen vereinzelte Pixel, die irrtümlicherweise als Vordergrund klassifiziert werden.
+2. **Löcher in Symbolen:** Symbole mit Füllung "halb" besitzen einen schraffierten Innenbereich, dessen Intensität nahe dem Schwellenwert liegt. Einzelne Innenpixel können als Hintergrund klassifiziert werden.
+
+**Verarbeitungssequenz:**
+
+1. **Opening** (Erosion gefolgt von Dilation, Disk-Kernel Radius r): entfernt kleine Rauschpixel ohne die Symbolränder stark zu verändern. Ein Disk-Kernel bewahrt runde Konturformen besser als ein quadratischer Kernel.
+2. **Filterung nach Mindestfläche** (`min_area_px`): entfernt verbleibende Kleinstkomponenten nach dem Opening.
+3. **Closing** (Dilation gefolgt von Erosion, Disk-Kernel Radius r): schliesst kleine Lücken innerhalb der Symbolregionen; relevant für "halb"-gefüllte Symbole.
+
+Kernel-Radius und die Entscheidung, ob Closing angewendet wird, sind die zwei variablen Parameter in den Konfigurationen.
+
+```{python}
+from skimage.morphology import disk
+
+fig, axes = plt.subplots(1, 3, figsize=(10, 3))
+for ax, r in zip(axes, [1, 2, 3]):
+    selem = disk(r)
+    ax.imshow(selem, cmap="gray_r", vmin=0, vmax=1)
+    ax.set_title(
+        f"Disk-Kernel | Radius r = {r}\n" f"({selem.shape[0]} x {selem.shape[1]} Pixel)"
+    )
+    ax.set_xlabel("x [Pixel]")
+    ax.set_ylabel("y [Pixel]")
+plt.suptitle("Strukturierende Elemente für Opening / Closing", y=1.05)
+plt.tight_layout()
+plt.show()
+```
+
+### Skeletonisierung
+
+**Methode:** `skimage.morphology.skeletonize` (thinning-basierter Algorithmus, liefert einen 1-Pixel breiten Skelettgraph).
+
+**Zielobjekt:** Die grösste Connected Component im Kartenausschnitt (maximale Pixelfläche nach morphologischer Bereinigung). Diese Wahl garantiert, dass ein vollständiges Symbol skeletonisiert wird und kein Rauschfragment oder Randausschnitt. Die Auswahl erfolgt automatisch über `skimage.measure.regionprops` nach der Labelisierung.
+
+**Metrik:** Skeleton Pixel Count -- die Gesamtzahl der Vordergrundpixel im Skelettbild -- dient als Mass für die Konturkomplexität des Symbols. Ein Balken hat ein einfaches, lineares Skelett (wenige Pixel); eine Welle ein gewundenes Skelett (mehr Pixel). Diese Metrik wird in Tag 14 für den Konfigurationsvergleich herangezogen.
+
+### Objekteigenschaften
+
+Drei geometrische Eigenschaften werden pro Connected Component extrahiert (`skimage.measure.regionprops`):
+
+| Eigenschaft | Scikit-image Attribut | Einheit | Relevanz für SET |
+|---|---|---|---|
+| Fläche | `area` | px² | Symbolanzahl: grössere Symbole bei 1x-Karten als bei 3x |
+| Umfang | `perimeter` | px | Formkomplexität: Welle > Raute > Balken |
+| Exzentrizität | `eccentricity` | dimensionslos [0, 1] | Elongiertheit: Balken/Welle hoch, Raute mittel |
+
+Exzentrizität = 0 entspricht einem Kreis, Exzentrizität = 1 einer Linie. Die Kombination von Fläche und Exzentrizität kann Symbole voneinander unterscheiden und ist ein erster Schritt zur Formklassifikation.
+
+### Schlüsselparameter
+
+| Parameter | Bedeutung | Getestete Werte |
+|---|---|---|
+| `kernel_size` | Radius des Disk-Kernels für Opening (und Closing) | 1, 2, 3 |
+| `use_closing` | Closing-Schritt nach Opening und Filterung | True / False |
+| `min_area_px` | Minimale Pixelfläche einer gültigen Connected Component | 200, 500 |
+
+### Konfigurationsübersicht
+
+| Konfiguration | `kernel_size` | `use_closing` | `min_area_px` | Rationale |
+|---|---|---|---|---|
+| Baseline    | 2 | False | 500 | Otsu + leichtes Opening; kein Closing; konservative Mindestfläche |
+| Variation 1 | 2 | True  | 500 | wie Baseline + Closing; verbessert "halb"-Symbole |
+| Variation 2 | 3 | True  | 200 | grösserer Kernel; kleineres min_area; robuster bei schwachen Symbolen |
+
+```{python}
+configs = [
+    {"name": "Baseline", "kernel_size": 2, "use_closing": False, "min_area_px": 500},
+    {"name": "Variation 1", "kernel_size": 2, "use_closing": True, "min_area_px": 500},
+    {"name": "Variation 2", "kernel_size": 3, "use_closing": True, "min_area_px": 200},
+]
+
+print(
+    f"{'Konfiguration':<14} {'kernel_size':>12} {'use_closing':>12} {'min_area_px':>12}"
+)
+print("-" * 52)
+for c in configs:
+    print(
+        f"{c['name']:<14} {c['kernel_size']:>12} {str(c['use_closing']):>12} {c['min_area_px']:>12}"
+    )
+```
+
+## Tag 13 -- Technische Implementierung
+
+*Wird an Tag 13 vervollständigt.*
+
+## Tag 14 -- Evaluation
+
+*Wird an Tag 14 vervollständigt.*
+
+## Tag 15 -- Analyse & Kommunikation
+
+*Wird an Tag 15 vervollständigt.*
+
+### Abschlussreflexion MC
+
+*Wird an Tag 15 vervollständigt.*
+
+### Revisionen
+
+<span style="background-color: #fff3b0;"><strong>Template für Revisionen:</strong> [Änderungen werden hier eingetragen...]</span>
+

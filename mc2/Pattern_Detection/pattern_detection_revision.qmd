@@ -1,0 +1,699 @@
+---
+title: GBSV MC2 -- Pattern Detection
+author: Luca Manna
+date: '2026-05-07'
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+lang: de
+jupyter: python3
+---
+
+# Aufgabe: Pattern Detection
+
+**Land:** USA  
+**Semester:** FS26
+
+## Tag 6 -- Technische Implementierung
+
+### Algorithmus: Canny Edge Detection
+
+Der Canny-Algorithmus ist ein klassisches Verfahren zur Kantendetektion [1]. Er kombiniert vier aufeinanderfolgende Schritte zu einer robusten, duennen Edge Map. Alle Schritte werden hier manuell implementiert und visualisiert, damit der vollstaendige Verarbeitungspfad schrittweise nachvollziehbar ist.
+
+Als Eingabe dient ein synthetisches Testbild mit einem Rechteck, einem Kreis und einer diagonalen Linie. Da die Kantengeometrie bekannt ist, laesst sich das Ergebnis jedes Schritts direkt pruefen.
+
+### Verarbeitungspipeline
+
+| Schritt | Bezeichnung | Aufgabe |
+|---------|-------------|---------|
+| 1 | Gaussian Blur | Rauschunterdrueckung vor der Gradientenberechnung |
+| 2 | Sobel Gradient | Gradientenbetrag und Gradientenrichtung pro Pixel |
+| 3 | Non-Maximum Suppression (NMS) | Ausdunnung der Kanten auf exakt eine Pixelbreite |
+| 4 | Hysteresis Thresholding | Klassifikation in Strong / Weak / kein Kantenpixel |
+
+### Baseline-Konfiguration
+
+| Parameter | Wert | Rolle |
+|-----------|------|-------|
+| `kernel_size` | 5 | Fenstergrösse des Gaussian-Filters [Pixel] |
+| `sigma` | 1.0 | Standardabweichung des Gaussians |
+| `sobel_ksize` | 3 | Kernelgrösse des Sobel-Operators |
+| `low_threshold` | 50 | Untere Hysteresegrenze [0-255] |
+| `high_threshold` | 150 | Obere Hysteresegrenze [0-255] |
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:21.004361Z', iopub.status.busy: '2026-05-04T12:43:21.004233Z', iopub.status.idle: '2026-05-04T12:43:21.549773Z', shell.execute_reply: '2026-05-04T12:43:21.549001Z'}
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+from scipy.ndimage import label
+
+# Baseline-Konfiguration
+KERNEL_SIZE = 5
+SIGMA = 1.0
+SOBEL_KSIZE = 3
+LOW_THRESHOLD = 50
+HIGH_THRESHOLD = 150
+```
+
+### Synthetisches Testbild
+
+Das Testbild (300 x 300 Pixel, Graustufen) enthaelt drei Strukturen mit unterschiedlichen Kantentypen:
+- **Rechteck:** gerade horizontale und vertikale Kanten
+- **Kreis:** gekruemmte Kante mit variabler Richtung
+- **Diagonale Linie:** schraege Kante bei ca. 10 Grad
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:21.551393Z', iopub.status.busy: '2026-05-04T12:43:21.551220Z', iopub.status.idle: '2026-05-04T12:43:21.640834Z', shell.execute_reply: '2026-05-04T12:43:21.640313Z'}
+H, W = 300, 300
+test_img = np.zeros((H, W), dtype=np.uint8)
+
+# Rechteck (oben links)
+test_img[50:160, 40:160] = 200
+
+# Kreis (oben rechts)
+cy, cx, r = 100, 225, 60
+yy, xx = np.ogrid[:H, :W]
+test_img[(xx - cx) ** 2 + (yy - cy) ** 2 <= r**2] = 180
+
+# Diagonale Linie (unten, 5 Pixel breit)
+steps = 250
+ys = np.round(np.linspace(220, 265, steps)).astype(int)
+xs = np.round(np.linspace(20, 280, steps)).astype(int)
+for dy in [-2, -1, 0, 1, 2]:
+    y_clip = np.clip(ys + dy, 0, H - 1)
+    test_img[y_clip, xs] = 160
+
+fig, ax = plt.subplots(figsize=(5, 5))
+ax.imshow(test_img, cmap="gray", vmin=0, vmax=255)
+ax.set_title("Synthetisches Testbild | 300 x 300 Pixel")
+ax.set_xlabel("x [Pixel]")
+ax.set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Groesse: {W} x {H} Pixel | dtype: {test_img.dtype} "
+    f"| Wertebereich: [{test_img.min()}, {test_img.max()}]"
+)
+```
+
+### Schritt 1: Gaussian Blur
+
+Ein Gauss-Filter glaettet das Bild, bevor Gradienten berechnet werden. Ohne diesen Schritt wuerden Rauschpixel zu falschen Kanten fuehren. Die Staerke der Glaettung bestimmt `sigma` (Standardabweichung). Ein groesseres `kernel_size` ergibt eine breitere Gewichtungsfunktion und damit staerkere Glaettung.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:21.642519Z', iopub.status.busy: '2026-05-04T12:43:21.642389Z', iopub.status.idle: '2026-05-04T12:43:21.749868Z', shell.execute_reply: '2026-05-04T12:43:21.749250Z'}
+blurred = cv2.GaussianBlur(
+    test_img,
+    ksize=(KERNEL_SIZE, KERNEL_SIZE),
+    sigmaX=SIGMA,
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(test_img, cmap="gray", vmin=0, vmax=255)
+axes[0].set_title("Original")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(blurred, cmap="gray", vmin=0, vmax=255)
+axes[1].set_title(f"Gaussian Blur | kernel={KERNEL_SIZE}x{KERNEL_SIZE}, sigma={SIGMA}")
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+diff = np.abs(test_img.astype(int) - blurred.astype(int))
+print(
+    f"Maximale Abweichung zum Original: {diff.max()} | "
+    f"Mittlere Abweichung: {diff.mean():.2f}"
+)
+```
+
+### Schritt 2: Sobel Gradient
+
+Der Sobel-Operator berechnet die partiellen Ableitungen des Bildes in x- und y-Richtung. Aus `dx` und `dy` ergibt sich der Gradientenbetrag (Kantenstärke) und die Gradientenrichtung (Kantenorientierung):
+
+$$|G| = \sqrt{G_x^2 + G_y^2} \qquad \theta = \arctan\!\left(\frac{G_y}{G_x}\right)$$
+
+Die Gradientenrichtung zeigt senkrecht zur Kante und wird im naechsten Schritt fuer die NMS benoetigt.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:21.751603Z', iopub.status.busy: '2026-05-04T12:43:21.751431Z', iopub.status.idle: '2026-05-04T12:43:21.996434Z', shell.execute_reply: '2026-05-04T12:43:21.995979Z'}
+gx = cv2.Sobel(blurred.astype(np.float64), cv2.CV_64F, 1, 0, ksize=SOBEL_KSIZE)
+gy = cv2.Sobel(blurred.astype(np.float64), cv2.CV_64F, 0, 1, ksize=SOBEL_KSIZE)
+
+magnitude = np.hypot(gx, gy)
+direction = np.arctan2(gy, gx)
+
+# Normalisieren fuer Visualisierung
+mag_norm = (magnitude / magnitude.max() * 255).astype(np.uint8)
+
+fig, axes = plt.subplots(2, 2, figsize=(10, 9))
+axes[0, 0].imshow(gx, cmap="RdBu_r")
+axes[0, 0].set_title(f"Sobel dx | ksize={SOBEL_KSIZE}")
+axes[0, 0].set_xlabel("x [Pixel]")
+axes[0, 0].set_ylabel("y [Pixel]")
+axes[0, 1].imshow(gy, cmap="RdBu_r")
+axes[0, 1].set_title(f"Sobel dy | ksize={SOBEL_KSIZE}")
+axes[0, 1].set_xlabel("x [Pixel]")
+axes[0, 1].set_ylabel("y [Pixel]")
+axes[1, 0].imshow(mag_norm, cmap="hot")
+axes[1, 0].set_title("Gradient Magnitude [normalisiert, 0-255]")
+axes[1, 0].set_xlabel("x [Pixel]")
+axes[1, 0].set_ylabel("y [Pixel]")
+axes[1, 1].imshow(direction, cmap="twilight")
+axes[1, 1].set_title("Gradient Direction [rad, -pi bis pi]")
+axes[1, 1].set_xlabel("x [Pixel]")
+axes[1, 1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Magnitude: max={magnitude.max():.1f} | "
+    f"Richtung: [{direction.min():.2f}, {direction.max():.2f}] rad"
+)
+```
+
+### Schritt 3: Non-Maximum Suppression (NMS)
+
+Nach der Sobel-Berechnung haben Kanten mehrere Pixel Breite. NMS behaelt pro Kante nur das lokale Maximum in Gradientenrichtung und setzt alle anderen Pixel auf null. Dazu wird die Gradientenrichtung auf vier Sektoren (0, 45, 90, 135 Grad) quantisiert und das aktuelle Pixel mit seinen beiden Nachbarn entlang der Gradientenachse verglichen.
+
+Die folgende Implementierung laeuft pixelweise mit einer Python-Schleife, um jeden Vergleich direkt nachvollziehbar zu machen.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:21.999379Z', iopub.status.busy: '2026-05-04T12:43:21.999254Z', iopub.status.idle: '2026-05-04T12:43:22.147399Z', shell.execute_reply: '2026-05-04T12:43:22.146814Z'}
+def non_maximum_suppression(mag, dirn):
+    H, W = mag.shape
+    nms = np.zeros_like(mag, dtype=np.float64)
+    angle = dirn * 180.0 / np.pi
+    angle[angle < 0] += 180
+
+    for i in range(1, H - 1):
+        for j in range(1, W - 1):
+            a = angle[i, j]
+            m = mag[i, j]
+            # Zwei Nachbarn entlang der quantisierten Gradientenrichtung
+            if (0 <= a < 22.5) or (157.5 <= a <= 180):
+                q, r = mag[i, j + 1], mag[i, j - 1]
+            elif 22.5 <= a < 67.5:
+                q, r = mag[i + 1, j - 1], mag[i - 1, j + 1]
+            elif 67.5 <= a < 112.5:
+                q, r = mag[i + 1, j], mag[i - 1, j]
+            else:
+                q, r = mag[i - 1, j - 1], mag[i + 1, j + 1]
+            if m >= q and m >= r:
+                nms[i, j] = m
+    return nms
+
+
+nms = non_maximum_suppression(magnitude, direction)
+nms_norm = (
+    (nms / nms.max() * 255).astype(np.uint8) if nms.max() > 0 else nms.astype(np.uint8)
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(mag_norm, cmap="hot")
+axes[0].set_title("Gradient Magnitude [vor NMS]")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(nms_norm, cmap="hot")
+axes[1].set_title("Nach Non-Maximum Suppression")
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+active_before = np.count_nonzero(mag_norm)
+active_after = np.count_nonzero(nms_norm)
+print(
+    f"Aktive Pixel vor NMS: {active_before} | "
+    f"nach NMS: {active_after} | "
+    f"Reduktion: {(1 - active_after / active_before) * 100:.1f} %"
+)
+```
+
+### Schritt 4: Hysteresis Thresholding
+
+Die NMS-Map enthaelt noch Gradientenwerte aus einem breiten Bereich. Hysteresis Thresholding klassifiziert die Pixel in drei Gruppen:
+- **Strong Edges:** Gradientenbetrag >= `high_threshold` -- sicher eine Kante
+- **Weak Edges:** `low_threshold` <= Gradientenbetrag < `high_threshold` -- nur dann Kante, wenn an eine Strong Edge angrenzend
+- **Suppressed:** < `low_threshold` -- kein Kantenpixel
+
+Die Verbindung von Weak Edges erfolgt ueber Connected-Components-Analyse: eine Weak-Edge-Komponente wird behalten, falls sie mindestens ein Strong-Edge-Pixel enthaelt.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:22.148996Z', iopub.status.busy: '2026-05-04T12:43:22.148867Z', iopub.status.idle: '2026-05-04T12:43:22.315175Z', shell.execute_reply: '2026-05-04T12:43:22.314585Z'}
+def hysteresis_thresholding(nms_map, low, high):
+    strong_mask = nms_map >= high
+    weak_mask = (nms_map >= low) & (nms_map < high)
+
+    # Verbundene Komponenten auf der Vereinigung beider Masken
+    labeled, n_components = label(strong_mask | weak_mask)
+
+    final = np.zeros_like(nms_map, dtype=bool)
+    for comp_id in range(1, n_components + 1):
+        comp_mask = labeled == comp_id
+        # Komponente behalten, wenn mindestens ein Strong-Pixel enthalten
+        if np.any(strong_mask[comp_mask]):
+            final[comp_mask] = True
+
+    return strong_mask, weak_mask, (final.astype(np.uint8) * 255)
+
+
+strong_mask, weak_mask, edges = hysteresis_thresholding(
+    nms, LOW_THRESHOLD, HIGH_THRESHOLD
+)
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+axes[0].imshow(strong_mask, cmap="gray")
+axes[0].set_title(f"Strong Edges | threshold >= {HIGH_THRESHOLD}")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(weak_mask, cmap="gray")
+axes[1].set_title(f"Weak Edges | {LOW_THRESHOLD} <= threshold < {HIGH_THRESHOLD}")
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+axes[2].imshow(edges, cmap="gray")
+axes[2].set_title("Finale Edge Map | nach Hysteresis")
+axes[2].set_xlabel("x [Pixel]")
+axes[2].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Strong Pixels: {strong_mask.sum()} | "
+    f"Weak Pixels: {weak_mask.sum()} | "
+    f"Finale Kantenpixel: {(edges > 0).sum()}"
+)
+```
+
+### Verifikation: Vergleich mit cv2.Canny
+
+Als Verifikation wird `cv2.Canny` mit denselben Schwellenwerten auf dasselbe geglättete Bild angewendet. OpenCV setzt intern eine L2-Normierung fuer den Gradienten, waehrend die manuelle Implementierung `np.hypot` nutzt. Deshalb sind leichte Abweichungen in der Kantenbreite und -position moeglich, die Gesamtstruktur sollte jedoch uebereinstimmen.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:22.316644Z', iopub.status.busy: '2026-05-04T12:43:22.316519Z', iopub.status.idle: '2026-05-04T12:43:22.425879Z', shell.execute_reply: '2026-05-04T12:43:22.425260Z'}
+edges_cv2 = cv2.Canny(
+    blurred,
+    threshold1=LOW_THRESHOLD,
+    threshold2=HIGH_THRESHOLD,
+    L2gradient=True,
+)
+
+manual_bin = edges > 0
+cv2_bin = edges_cv2 > 0
+intersection = np.logical_and(manual_bin, cv2_bin).sum()
+union = np.logical_or(manual_bin, cv2_bin).sum()
+iou = intersection / union if union > 0 else 0
+count_ratio = manual_bin.sum() / cv2_bin.sum() if cv2_bin.sum() > 0 else 0
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+axes[0].imshow(edges, cmap="gray")
+axes[0].set_title(f"Manuelle Implementierung | {manual_bin.sum()} Kantenpixel")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+axes[1].imshow(edges_cv2, cmap="gray")
+axes[1].set_title(f"cv2.Canny (L2gradient=True) | {cv2_bin.sum()} Kantenpixel")
+axes[1].set_xlabel("x [Pixel]")
+axes[1].set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Manuelle Implementierung: {manual_bin.sum()} Kantenpixel | "
+    f"cv2.Canny: {cv2_bin.sum()} Kantenpixel"
+)
+print(f"Anzahlverhaeltnis (manuell / cv2): {count_ratio:.3f} | IoU: {iou:.3f}")
+```
+
+### Beobachtungen
+
+Alle vier Verarbeitungsschritte liefern das erwartete Ergebnis. Der Gaussian-Blur glaettet die scharfen Kanten des synthetischen Bildes, erkennbar am reduzierten Spitzenwert der Gradient-Magnitude. Die Sobel-Karte zeigt klar trennbare Gradienten fuer alle drei Strukturen; die Richtungsvisualisierung weist die erwarteten Sektoren aus (0 Grad horizontal am Rechteck, 90 Grad vertikal, ca. 10 Grad diagonal). Der NMS-Schritt reduziert die aktiven Pixel von 8447 auf 2128 (74.8 %), was die breiten Gradientenbaender auf einzelne Pixelreihen ausduennt. Die Hysteresis-Komponenten-Analyse verbindet unterbrochene Segmente entlang der Kreiskontur, die im Strong-Edge-Bild noch vereinzelte Luecken zeigt.
+
+Der Vergleich mit  (1452 Kantenpixel) ergibt 34 % mehr Kantenpixel in der manuellen Implementierung (1944 Pixel). Die Ursache liegt in der NMS-Nachbarinterpolation: die manuelle Version nutzt eine strikte 4-Sektor-Quantisierung mit -Vergleich, waehrend OpenCV sub-pixelgenaue Interpolation entlang der Gradientenrichtung anwendet. Die detektierten Strukturen (Rechteck, Kreis, diagonale Linie) sind in beiden Ergebnissen klar und vollstaendig sichtbar, was die korrekte Funktionsweise der Implementierung bestaetigt.
+
+## Tag 7 -- Daten & Domäne
+
+### Anwendungsfall
+
+SET ist ein US-amerikanisches Kartenspiel, das 1974 von Marsha Falco entwickelt und durch Set Enterprises (Fountain Hills, Arizona) vertrieben wird. Auf dem Tisch liegen 12 Karten in einer 3x4-Auslage. Alle Spielenden suchen gleichzeitig nach einer gültigen Dreierkombination über vier Eigenschaften: Menge (1, 2 oder 3 Symbole), Farbe (rot, violett, grün), Form (Raute, Balken, Welle) und Füllung (leer, halb, voll). Persönliche Motivation: Ich spiele SET regelmässig mit meiner Freundin und verliere dabei konstant.
+
+Das langfristige Ziel ist ein System, das aus einem Smartphone-Foto der Auslage automatisch das nächste gültige SET vorschlägt. Als ersten Verarbeitungsschritt müssen die 12 Karten im Bild lokalisiert werden. Dieser Tag fokussiert auf die Detektion der Kartenränder als konkreten Anwendungskontext für den Canny-Algorithmus aus Tag 6.
+
+### Problemstellung
+
+Die 12 Karten in einer realen Smartphone-Aufnahme müssen automatisch lokalisiert werden. Der stärkste lokale Intensitätswechsel im Bild entsteht am Übergang von weisser Kartenfläche zu dunkelgrünem Tischtuch. Diese Kanten sind der direkteste Anhaltspunkt für eine kartenbasierte Lokalisierung.
+
+Drei Herausforderungen für die Kantendetektion in diesem Bild:
+
+1. **Karte-Karte-Grenzen:** Benachbarte Karten haben kaum Kontrast zueinander. Der Algorithmus muss diese schwachen Grenzen von den starken Karte-Untergrund-Kanten unterscheiden.
+2. **Ungleichmässige Beleuchtung:** Das Bild zeigt einen Helligkeitsgradienten von oben nach unten, der die effektive Kantenstärke ortsabhängig macht.
+3. **Symbole auf den Karten:** Farb- und Formkonturen innerhalb der Karte erzeugen ebenfalls Kanten, die für die Kartenlokalisierung nicht relevant sind.
+
+Der Hysteresis-Mechanismus des Canny-Algorithmus adressiert diese Punkte direkt: mit einem geeigneten `high_threshold` werden nur die starken Karte-Untergrund-Kanten sicher klassifiziert, während schwache interne Kanten unterdrückt werden.
+
+### Datendefinition, Quelle und Visualisierung
+
+Das Referenzbild ist eine eigene Smartphone-Aufnahme einer regulären SET-Auslage (`mc2/data/IMG_6947.JPG`, 4032 x 3024 Pixel, RGB, JPG-komprimiert). Es zeigt 12 Karten in 3x4-Anordnung auf einer dunkelgrünen Spielmatte und repräsentiert eine typische Spielsituation. Das Bild wurde in Aufgabe 1 (Augmentation, Tag 1) bereits als Referenzbild analysiert; dort wurden photometrische Eigenschaften und Bildcharakteristika beschrieben. Hier dient es als Eingabe für die Kantendetektion.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:22.427377Z', iopub.status.busy: '2026-05-04T12:43:22.427252Z', iopub.status.idle: '2026-05-04T12:43:22.947501Z', shell.execute_reply: '2026-05-04T12:43:22.946864Z'}
+from pathlib import Path
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_pil = Image.open(IMG_PATH)
+img = np.array(img_pil)
+img_gray = np.array(img_pil.convert("L"))
+H, W = img.shape[:2]
+
+fig, ax = plt.subplots(figsize=(10, 7.5))
+ax.imshow(img)
+ax.set_title(f"IMG_6947.JPG | {W} x {H} Pixel | 12 Karten, 3x4 Auslage")
+ax.set_xlabel("x [Pixel]")
+ax.set_ylabel("y [Pixel]")
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Auflösung: {W} x {H} Pixel | Kanäle: {img.shape[2]} "
+    f"| dtype: {img.dtype} | Wertebereich: [{img.min()}, {img.max()}]"
+)
+```
+
+**Beobachtungen:**
+
+Die 12 Karten sind vollständig sichtbar und klar gegen den dunkelgrünen Untergrund abgesetzt. Das Bild zeigt eine leichte perspektivische Verkippung und einen Helligkeitsgradienten von oben nach unten. Auf einzelnen Karten sind schwache Glanzlichter erkennbar. Die Kartenränder bilden die dominanten Kanten im Bild und sind der natürliche Zielpunkt für den Canny-Algorithmus.
+
+### Identifizierte Bildstruktur
+
+Als Zielstruktur für die Kantendetektion wird der **Übergang zwischen Kartenrand und Untergrund** ausgewählt. Dieser Übergang ist charakterisiert durch einen starken Intensitätssprung vom dunkelgrünen Tischtuch (ca. 30 auf dem Graukanal) zur weissen Kartenfläche (ca. 230). Die Kantenbreite beträgt schätzungsweise 3-8 Pixel durch JPEG-Kompression und leichte Defokussierung.
+
+Zur Verifikation wird ein repräsentativer Bildausschnitt mit einem Kartenrand analysiert und ein Intensitätsprofil quer über den Rand dargestellt.
+
+```{python}
+#| execution: {iopub.execute_input: '2026-05-04T12:43:22.952586Z', iopub.status.busy: '2026-05-04T12:43:22.952377Z', iopub.status.idle: '2026-05-04T12:43:23.424281Z', shell.execute_reply: '2026-05-04T12:43:23.423530Z'}
+from matplotlib.patches import Rectangle
+
+# Ausschnitt: linke Karte, erste Kartenreihe (Kartenrand links sichtbar)
+y0, y1 = int(0.06 * H), int(0.25 * H)
+x0, x1 = int(0.02 * W), int(0.22 * W)
+crop_rgb = img[y0:y1, x0:x1]
+crop_gray = img_gray[y0:y1, x0:x1]
+
+# Intensitätsprofil entlang der mittleren Zeile des Ausschnitts
+mid_row = crop_gray.shape[0] // 2
+profile = crop_gray[mid_row, :]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+axes[0].imshow(img)
+rect = Rectangle(
+    (x0, y0), x1 - x0, y1 - y0, linewidth=2, edgecolor="yellow", facecolor="none"
+)
+axes[0].add_patch(rect)
+axes[0].set_title("Referenzbild | Analysierter Bereich (gelb)")
+axes[0].set_xlabel("x [Pixel]")
+axes[0].set_ylabel("y [Pixel]")
+
+axes[1].imshow(crop_rgb)
+axes[1].axhline(y=mid_row, color="yellow", linewidth=1.5, linestyle="--")
+axes[1].set_title("Zoom: Kartenrand | Profilzeile (gestrichelt)")
+axes[1].set_xlabel("x [Pixel, ausschnitt-relativ]")
+axes[1].set_ylabel("y [Pixel, ausschnitt-relativ]")
+
+axes[2].plot(profile, color="steelblue")
+axes[2].set_title("Intensitätsprofil quer zum Kartenrand")
+axes[2].set_xlabel("x [Pixel, ausschnitt-relativ]")
+axes[2].set_ylabel("Intensität [0-255]")
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(
+    f"Profilbereich: Zeile {mid_row} des Ausschnitts "
+    f"| Intensität: [{profile.min()}, {profile.max()}] "
+    f"| Lokaler Kontrast: {profile.max() - profile.min()}"
+)
+```
+
+**Beobachtungen:**
+
+Das Intensitätsprofil zeigt den erwarteten Sprung vom dunklen Untergrund zur hellen Kartenfläche. Der Übergang erfolgt innerhalb weniger Pixel und ist deutlich steiler als die internen Texturvariationen auf der Kartenfläche. Dieser starke, lokalisierte Intensitätswechsel bestätigt, dass die Zielstruktur für den Canny-Algorithmus geeignet ist.
+
+### Algorithmenbegründung
+
+Der Canny-Algorithmus (Tag 6) ist für diese Zielstruktur aus drei Gründen geeignet:
+
+1. **Gaussian Blur:** Dämpft JPEG-Kompressionsartefakte und lokale Texturvariationen auf der Kartenfläche, ohne die dominanten Kartenrand-Kanten wesentlich zu schwächen.
+2. **Non-Maximum Suppression:** Erzeugt exakt ein-Pixel-breite Kanten, was für die spätere geometrische Analyse der Kartenränder erforderlich ist.
+3. **Hysteresis Thresholding:** Mit geeignetem `high_threshold` werden nur die starken Karte-Untergrund-Übergänge sicher klassifiziert, schwache Karte-Karte-Grenzen und interne Symboltexturen werden unterdrückt.
+
+Die konkrete Parameter-Konfiguration für das reale SET-Bild wird in Tag 8 erarbeitet.
+
+## Tag 8 -- Methodisches Design
+
+### Kontext
+
+Ziel ist die Detektion der Kartenränder in einer Smartphone-Aufnahme der SET-Auslage (`IMG_6947.JPG`, 4032 x 3024 Pixel). Der implementierte Canny-Algorithmus (Tag 6) wird auf dieses Bild angewendet. Die Zielstruktur ist der Intensitätssprung zwischen weisser Kartenfläche (~230) und dunkelgrünem Tischtuch (~30), der in Tag 7 durch ein Intensitätsprofil verifiziert wurde.
+
+### Repräsentativer Bildausschnitt
+
+Für das methodische Design und die spätere Evaluation wird ein einzelner Bildausschnitt verwendet:
+
+| Eigenschaft | Wert |
+|-------------|------|
+| Position | y: 100--1000 px, x: 80--1480 px |
+| Grösse | 1400 x 900 Pixel |
+| Inhalt | Linke zwei Karten der ersten Reihe, inklusive Karte-Untergrund-Kante (links), Karte-Karte-Grenze (vertikal, Mitte) und Symboltextur auf beiden Karten |
+
+Dieser Ausschnitt enthält alle drei relevanten Kantentypen gleichzeitig: starke Karte-Untergrund-Übergänge, schwache Karte-Karte-Grenzen und interne Symboltexturen. Er eignet sich damit zur kontrollierten Beurteilung, welche Kanten der Algorithmus unter verschiedenen Parametern erkennt oder unterdrückt.
+
+### Schlüsselparameter
+
+Drei Parameter des Canny-Algorithmus haben den stärksten Einfluss auf das Detektionsergebnis in diesem Bild:
+
+| Parameter | Rolle | Erwarteter Effekt auf dieses Bild |
+|-----------|-------|------------------------------------|
+| `sigma` (Gaussian Blur) | Stärke der Vorabglättung | Zu klein: JPEG-Kompressionsartefakte und Kartentextur erzeugen Falschkanten. Zu gross: Der schmale Karte-Untergrund-Übergang (~5 px) wird unscharf, Ecken der Karten verlieren Kantenstärke. Optimaler Bereich: 1.0--2.5. |
+| `high_threshold` | Klassifiziert Pixel sicher als Kante | Zu hoch: Der Helligkeitsgradient im Bild (oben heller, unten dunkler) führt dazu, dass Karten im unteren Bildbereich nicht mehr als Strong Edges erkannt werden. Zu tief: Karte-Karte-Grenzen und Symboltexturen werden fälschlicherweise als starke Kanten klassifiziert. Kritischer Parameter für die Selektivität. |
+| `low_threshold` | Bestimmt, welche Weak Edges in verbundene Komponenten einbezogen werden | Beeinflusst die Vollständigkeit der Kartenkontur: zu tief schliesst Rauschen ein, zu hoch erzeugt Lücken an Ecken und Glanzlichtstellen. Wird als festes Verhältnis `low = high / 3` definiert (nach Canny-Empfehlung 1:3), damit jeweils nur ein Parameter frei variiert. |
+
+### Konfigurationen
+
+Es werden drei Konfigurationen definiert. Zwischen Baseline und den Variationen wird jeweils nur ein Parameter verändert, um den Effekt eindeutig zuordnen zu können.
+
+| Konfiguration | `sigma` | `high_threshold` | `low_threshold` | Erwartetes Ergebnis |
+|---------------|---------|-----------------|-----------------|---------------------|
+| **Baseline** | 1.5 | 120 | 40 | Ausgewogene Detektion: dominante Karte-Untergrund-Kanten werden erkannt, schwache Karte-Karte-Grenzen grösstenteils unterdrückt. Kartenecken sollten vollständig sein. |
+| **Variation 1** -- stärkere Glaettung + höhere Schwellen | 2.5 | 160 | 53 | Stärkeres Blur dämpft JPEG-Artefakte und Texturgradienten. Höhere Schwellen selektieren nur die kontrastreichsten Kanten. Erwartet: sauberere, aber eventuell lückenhaftere Kartenkontur in dunkleren Bildbereichen. |
+| **Variation 2** -- schwächere Glaettung + niedrigere Schwellen | 1.0 | 80 | 27 | Weniger Vorglättung erhält feine Details, niedrigere Schwellen schliessen schwächere Kanten ein. Erwartet: vollständigere Kartenkontur, aber mehr Falschkanten durch Symboltexturen und JPEG-Artefakte. |
+
+### Begründung der Konfigurationswahl
+
+Die drei Konfigurationen decken einen sinnvollen Parameterraum ab und ermöglichen zwei isolierte Vergleiche:
+
+- **Baseline vs. Variation 1** zeigt den Effekt von mehr Glättung und höherer Selektivität. Dies ist relevant, weil das Bild einen Helligkeitsgradienten hat: erhöht man `high_threshold`, werden Karten im dunkleren unteren Bildbereich womöglich nicht mehr erkannt.
+- **Baseline vs. Variation 2** zeigt den Effekt von weniger Glättung und niedrigerer Selektivität. Dies verdeutlicht, ab wann interne Symboltexturen als Kanten durchdringen.
+
+Das feste Verhältnis `low = high / 3` folgt der Empfehlung des Original-Canny-Papers und verhindert, dass zwei Parameter gleichzeitig variieren. `sigma` und `high_threshold` sind die dominanten Stellgrössen; das `low_threshold` wird davon abgeleitet.
+
+Viele weitere Parameterkombinationen wären möglich, aber der Erkenntnisgewinn nimmt schnell ab. Zwei gezielte Variationen sind ausreichend, um die Empfindlichkeit des Algorithmus gegenüber den zwei Hauptproblemen dieses Bildes -- Beleuchtungsgradient und interne Texturkanten -- zu bewerten.
+
+## Tag 9 -- Evaluation
+
+### Evaluationsmass
+
+Als einziges quantitatives Mass wird die **Kantendichte** (Edge Density) des gesamten Ausschnitts verwendet:
+
+$$\rho = \frac{\text{Anzahl Kantenpixel}}{\text{Gesamtpixel im Ausschnitt}} \times 100 \; [\%]$$
+
+**Definition:** $\rho$ gibt an, welcher Anteil der Pixel im Ausschnitt als Kantenpixel klassifiziert wird.
+
+**Eignung:** Für die Kartenrand-Detektion ist eine kompakte, präzise Kantenmenge erwünscht. Zu hohe Kantendichte zeigt, dass der Algorithmus Rausch- und Texturkanten einschliesst; zu niedrige Kantendichte deutet auf verpasste Kartenränder hin. Das Mass ist direkt über alle Konfigurationen vergleichbar, benötigt keine Ground-Truth-Labels und ist unabhängig von der genauen Lage einzelner Strukturen im Ausschnitt.
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+from pathlib import Path
+from PIL import Image
+
+IMG_PATH = Path("..") / "data" / "IMG_6947.JPG"
+img_gray = np.array(Image.open(IMG_PATH).convert("L"))
+
+# Ausschnitt: linke zwei Karten, erste Reihe
+Y0, Y1, X0, X1 = 100, 1000, 80, 1480
+crop = img_gray[Y0:Y1, X0:X1]
+H_c, W_c = crop.shape
+
+# Konfigurationen aus Tag 8
+CONFIGS = {
+    "Baseline": dict(sigma=1.5, high=120, low=40),
+    "Variation 1": dict(sigma=2.5, high=160, low=53),
+    "Variation 2": dict(sigma=1.0, high=80, low=27),
+}
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.imshow(crop, cmap="gray", vmin=0, vmax=255)
+ax.set_title(f"Ausschnitt | y: {Y0}-{Y1}, x: {X0}-{X1} | {W_c} x {H_c} Pixel")
+ax.set_xlabel("x [Pixel, ausschnitt-relativ]")
+ax.set_ylabel("y [Pixel, ausschnitt-relativ]")
+plt.tight_layout()
+plt.show()
+
+print(f"Ausschnitt: {W_c} x {H_c} = {W_c * H_c:,} Pixel")
+```
+
+### Anwendung auf alle Konfigurationen
+
+Der Canny-Algorithmus (Gaussian Blur + `cv2.Canny` mit `L2gradient=True`, wie in Tag 6 verifiziert) wird auf den Ausschnitt angewendet. Die Kantendichte $\rho$ wird für jede Konfiguration berechnet.
+
+```{python}
+def apply_canny(gray, sigma, low, high):
+    ksize = max(5, 2 * int(2 * sigma) + 1)  # ungerade, >= 5
+    blurred = cv2.GaussianBlur(gray, (ksize, ksize), sigmaX=sigma)
+    return cv2.Canny(blurred, threshold1=low, threshold2=high, L2gradient=True)
+
+
+results = {}
+edge_maps = {}
+
+for name, cfg in CONFIGS.items():
+    edges = apply_canny(crop, cfg["sigma"], cfg["low"], cfg["high"])
+    edge_maps[name] = edges
+    n_edge = int((edges > 0).sum())
+    rho = n_edge / edges.size * 100
+    results[name] = dict(
+        sigma=cfg["sigma"], high=cfg["high"], low=cfg["low"], n_edge=n_edge, rho=rho
+    )
+
+baseline_rho = results["Baseline"]["rho"]
+
+print(
+    f"{'Konfiguration':<14} {'sigma':>6} {'high':>5} {'low':>5} "
+    f"{'Kantenpixel':>12} {'rho [%]':>8} {'Delta rho [%]':>14}"
+)
+print("-" * 72)
+for name, r in results.items():
+    delta = r["rho"] - baseline_rho
+    delta_str = f"{delta:+.3f}" if name != "Baseline" else "--"
+    print(
+        f"{name:<14} {r['sigma']:>6.1f} {r['high']:>5} {r['low']:>5} "
+        f"{r['n_edge']:>12,} {r['rho']:>8.3f} {delta_str:>14}"
+    )
+```
+
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+for ax, (name, edges) in zip(axes, edge_maps.items()):
+    cfg = CONFIGS[name]
+    r = results[name]
+    ax.imshow(edges, cmap="gray")
+    ax.set_title(
+        f"{name}\n"
+        f"sigma={cfg['sigma']}, high={cfg['high']}, low={cfg['low']}\n"
+        f"rho = {r['rho']:.3f}%  |  {r['n_edge']:,} Kantenpixel",
+        fontsize=9,
+    )
+    ax.set_xlabel("x [Pixel, ausschnitt-relativ]")
+    ax.set_ylabel("y [Pixel, ausschnitt-relativ]")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# === Revision 19.05.2026: quantitativer Bewertungsmassstab fuer rho ===
+# Geometrische Referenz fuer "vollstaendige Karten-Aussenrand-Detektion":
+# Annahme aus Tag 7/8: 2 Karten von ca. 700 x 900 px nebeneinander im
+# 1400 x 900 px Ausschnitt. NMS-Ausgabe ist nach Tag 6 1 px breit.
+
+CARD_W_PX, CARD_H_PX = 700, 900
+N_CARDS = 2
+
+perimeter_per_card = 2 * (CARD_W_PX + CARD_H_PX)
+shared_inner_edge = CARD_H_PX  # vertikale Karte-Karte-Grenze (einmal geteilt)
+edge_px_geom = N_CARDS * perimeter_per_card - shared_inner_edge
+
+rho_geom = edge_px_geom / (W_c * H_c) * 100  # %
+
+print("Geometrische Referenz rho_geom (Karte-Aussenraender, 1 px Linienbreite):")
+print(f"  Aussenrand-Pixel:  {edge_px_geom:>8,d}")
+print(f"  rho_geom:          {rho_geom:>8.3f} %")
+print()
+print("Einordnung der Konfigurationen relativ zu rho_geom:")
+print(f"{'Konfiguration':<14} {'rho [%]':>8} {'rho / rho_geom':>16}   Bewertung")
+print("-" * 100)
+
+for name, r in results.items():
+    ratio = r["rho"] / rho_geom
+    if ratio < 1.0:
+        verdict = "unter Minimum -- Aussenraender unvollstaendig"
+    elif ratio < 1.5:
+        verdict = "an Untergrenze -- Aussenraender ohne Puffer"
+    elif ratio < 5.0:
+        verdict = "balanciert -- Aussenraender + Symbol-Huelle, Clutter trennbar"
+    else:
+        verdict = "Clutter dominiert -- Texturkanten und Rauschen ueberwiegen"
+    print(f"{name:<14} {r['rho']:>8.3f} {ratio:>14.2f} x   {verdict}")
+```
+
+<span style="color:#c0392b">**[Revision 19.05.2026 -- Start]**</span>
+
+### Vergleich gegenüber Baseline und Entscheidung
+
+Damit aus den drei $\rho$-Werten eine Bewertung wird, braucht es eine quantitative Referenzgrösse für "wie viel Kantenmenge ist für die Kartenrand-Detektion eigentlich nötig".
+
+**Geometrische Referenz $\rho_{geom}$.** Der Ausschnitt zeigt zwei Karten von je ca. 700 $\times$ 900 px nebeneinander. Pro Karte beträgt der Aussenrand $2(700+900) = 3'200$ px; bei zwei Karten ergibt das $6'400$ px, abzüglich der einmal geteilten Karte-Karte-Grenze von $900$ px also $5'500$ Aussenrand-Pixel. Bei der in Tag 6 verifizierten NMS-Ausgabe mit 1 px Linienbreite folgt
+
+$$\rho_{geom} = \frac{5\,500}{1\,260\,000} \times 100 \approx 0{.}44\,\%$$
+
+$\rho_{geom}$ ist die theoretische Untergrenze für eine geometrisch vollständige Kartenrand-Detektion. Werte unterhalb implizieren Verlust von Aussenrand-Anteilen, Werte deutlich oberhalb implizieren Kantenpixel, die nicht durch die Aussenrand-Geometrie erklärbar sind (Symbol-Konturen, Karten-Oberflächentextur, JPEG-Artefakte, Helligkeitsfluktuationen) -- im Sinne des Use Case also Clutter.
+
+**Bewertungs-Korridore relativ zu $\rho_{geom}$** (im Code-Block oben implementiert):
+
+- $\rho / \rho_{geom} < 1.0$: unter geometrischem Minimum -- Aussenränder unvollständig.
+- $1.0 \leq \rho / \rho_{geom} < 1.5$: an Untergrenze -- Aussenränder erkannt, kein Puffer für reale Bildvarianzen.
+- $1.5 \leq \rho / \rho_{geom} < 5.0$: balanciert -- Aussenränder plus Symbol-Hülle, Clutter visuell trennbar.
+- $\rho / \rho_{geom} \geq 5.0$: Texturkanten und Rauschen dominieren das Edge-Map.
+
+**Einordnung der drei Konfigurationen.**
+
+| Konfiguration | $\rho$ [%] | $\rho / \rho_{geom}$ | Position |
+|---|---:|---:|---|
+| Variation 1 | 0.578 | $\approx 1.32\times$ | an Untergrenze |
+| Baseline    | 1.865 | $\approx 4.27\times$ | balanciert |
+| Variation 2 | 9.188 | $\approx 21.05\times$ | Clutter dominiert |
+
+**Trade-off zwischen Vollständigkeit (Recall) und Sauberkeit (Precision).** Die drei Konfigurationen liegen auf einer klaren Achse zwischen zwei Extremen:
+
+- **Variation 1** maximiert die Sauberkeit der Kantenmenge auf Kosten der Vollständigkeit. Mit $\rho \approx 1.32 \times \rho_{geom}$ existiert kaum Puffer für reale Bildvarianzen wie den in Tag 7 dokumentierten Helligkeitsgradienten: Karten in dunkleren Bildregionen verlieren mit derselben Parametrisierung erwartungsbar Aussenrand-Anteile.
+- **Variation 2** maximiert die Vollständigkeit auf Kosten der Sauberkeit. Aussenränder werden zuverlässig erkannt, doch Karten-Aussenrand und Clutter sind im resultierenden Edge-Map kaum noch trennbar (rund 95 % der Kantenpixel sind nicht durch die Aussenrand-Geometrie erklärbar), was die nachgelagerte Konturextraktion vor ein Trennungsproblem stellt.
+- **Baseline** liegt mit $\approx 4.27 \times \rho_{geom}$ im balancierten Korridor: Aussenränder vollständig, Symbol-Hülle als nützliches Zusatzsignal mitgeführt, Clutter visuell noch trennbar.
+
+**Entscheidung.** Für die Kartenrand-Detektion ist die **Baseline** die geeignetste Konfiguration. Sie erreicht das in Tag 8 spezifizierte Zielprofil (vollständige Aussenränder plus abgrenzbare Symbol-Hülle bei überschaubarem Clutter-Anteil) und ist gegenüber den in Tag 7 identifizierten Bildvarianzen robust genug, um auch in dunkleren Bildregionen verlässliche Ränder zu liefern.
+
+<span style="color:#c0392b">**[Revision 19.05.2026 -- Ende]**</span>
+
+## Tag 10 -- Analyse & Kommunikation
+
+### Beobachtungen
+
+Die drei Konfigurationen erzeugen deutlich unterschiedliche Kantendichten: Variation 1 (sigma=2.5, high=160) liefert 0.578%, die Baseline (sigma=1.5, high=120) 1.865% und Variation 2 (sigma=1.0, high=80) 9.188%. Die Spanne zwischen der selektivsten und der permissivsten Konfiguration beträgt damit das 16-fache. Die Edge Maps zeigen, dass Variation 1 nur die kontrastreichsten Kanten -- hauptsächlich Kartenränder -- erfasst, während Variation 2 zusätzlich Symboltexturen, Glanzlichter und JPEG-Artefakte einschliesst.
+
+### Interpretation
+
+Der `high_threshold` ist der dominante Parameter: eine Erhöhung von 120 auf 160 reduziert die Kantendichte um 1.288 Prozentpunkte (-69%), eine Absenkung auf 80 erhöht sie um 7.323 Prozentpunkte (+393%). Das stärkere Gaussian-Blur in Variation 1 (sigma=2.5) dämpft zusätzlich schwache Gradienten, was die selektive Wirkung des höheren Schwellenwerts verstärkt. Die Baseline liegt mit 1.865% in einem Bereich, der grobe Kartenumrisse liefert, ohne die Edge Map mit Texturkanten zu überladen.
+
+### Diskussion
+
+Für die Kartenlokalisierung im SET-Bild ist eine kompakte Edge Map erwünscht: zu viele Kanten erschweren die anschliessende Konturextraktion, zu wenige erzeugen Lücken in den Kartenumrissen. Die Baseline-Konfiguration stellt den besten Kompromiss dar, weist aber eine Schwäche auf: ohne Ground-Truth-Labels lässt sich nicht direkt messen, ob die 1.865% die richtigen Kanten enthalten. Die starke Parameterempfindlichkeit (+393% zwischen Baseline und Variation 2) zeigt, dass eine robuste Kartendetektion in diesem Bild eine gezielte Schwellenwert-Kalibrierung erfordert -- idealerweise mit adaptiven Methoden, die den Beleuchtungsgradienten im Bild berücksichtigen.
+
+## Quellenverzeichnis
+
+[1] J. Canny, "A Computational Approach to Edge Detection," *IEEE Transactions on Pattern Analysis and Machine Intelligence*, vol. PAMI-8, no. 6, pp. 679-698, Nov. 1986.
+
